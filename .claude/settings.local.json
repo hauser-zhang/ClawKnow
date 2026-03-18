@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Read(//c/Users/Hauser/.claude/plugins/marketplaces/claude-plugins-official/**)",
+      "Bash(xargs ls:*)",
+      "Bash(find ~/.claude/plugins/marketplaces/claude-plugins-official/plugins/skill-creator -name plugin.json -exec cat {})",
+      "Bash(find ~/.claude -name installed* -o -name *.installed)",
+      "Bash(mkdir -p ~/.claude/skills/skill-creator)",
+      "Bash(mv ~/.claude/skills/LICENSE.txt ~/.claude/skills/SKILL.md ~/.claude/skills/agents ~/.claude/skills/assets ~/.claude/skills/eval-viewer ~/.claude/skills/references ~/.claude/skills/scripts ~/.claude/skills/skill-creator/)",
+      "Bash(mkdir -p ~/.claude/commands)",
+      "Bash(cp ~/.claude/plugins/marketplaces/claude-plugins-official/plugins/commit-commands/commands/commit.md ~/.claude/commands/)",
+      "Bash(cp ~/.claude/plugins/marketplaces/claude-plugins-official/plugins/commit-commands/commands/commit-push-pr.md ~/.claude/commands/)",
+      "Bash(cp ~/.claude/plugins/marketplaces/claude-plugins-official/plugins/commit-commands/commands/clean_gone.md ~/.claude/commands/)",
+      "Bash(cp ~/.claude/plugins/marketplaces/claude-plugins-official/plugins/code-review/commands/code-review.md ~/.claude/commands/)",
+      "Bash(gh pr:*)"
+    ]
+  }
+}
