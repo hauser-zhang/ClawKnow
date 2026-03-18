@@ -1,111 +1,109 @@
 ---
 name: plan-wiki
 description: >
-  分析用户提供的文档内容，自动规划飞书知识库的树形结构。
-  当用户提供了学习文档、要求整理知识体系、讨论知识库如何组织分类、
-  或者说"帮我规划一下知识库"、"整理一下这些内容"时自动触发。
-  即使用户没有明确说"知识库"，只要涉及到将文档内容进行结构化整理，也应该触发。
+  分析 docs/ 目录下的学习文档，生成飞书知识库的树形结构（knowledge_tree.json）。
+  触发：用户明确要求"规划知识库"、"整理文档到飞书"、"帮我建知识树"、"生成知识库结构"，
+  或者提供文档后说要保存/组织到飞书知识库里。
+  不触发：仅讨论文档内容本身（无建库意图）；仅提问技术概念；仅整理某个文件格式。
+  写操作：会覆盖 workspaces/<kb_id>/knowledge_tree.json，执行前须用户确认。
 allowed-tools: Read, Glob, Bash(python *)
 ---
 
 # 知识库结构规划
 
-你正在帮助用户将学习文档规划为结构化的飞书知识库。
+## 元数据
 
-## 完整流程
+| 项目 | 内容 |
+|------|------|
+| 用途 | 分析 docs/ 文档 → 生成分层知识树 → 保存为 JSON |
+| 输入 | `docs/` 目录下的 `.md` / `.txt` / `.rst` 文件（或 kb.yaml 指定的 docs_dir）|
+| 输出 | 控制台打印 Markdown 大纲 |
+| 副作用 | **覆盖写** `workspaces/<kb_id>/knowledge_tree.json` |
+| 需要确认 | 是 — 展示大纲后等用户确认再保存 |
 
-### 第一步：读取文档
+## 触发条件
 
-1. 用 Glob 找到 `docs/` 下所有文件（`.md`, `.txt`, `.rst`）
-2. 用 Read 逐个读取内容
-3. 如果 `docs/` 为空，提示用户先放入文档
+**会触发（需包含建库意图）：**
+- "帮我规划一下知识库"
+- "把 docs/ 里的文档整理成飞书知识库"
+- "生成一个知识树结构"
+- "我有一些笔记，帮我建个知识库"
 
-### 第二步：分析并生成知识树
+**不触发：**
+- 仅问"什么是 MoE"（→ ask-kb 处理）
+- "帮我整理一下这篇文档的格式"
+- "归档一下"（→ archive 处理）
+- 已有知识树，仅问某个概念
 
-运行规划脚本：
+## 执行流程
+
+### 第一步：定位文档
+
+用 Glob 找到 docs 目录下所有支持文件（`.md`, `.txt`, `.rst`）：
 
 ```bash
-# 默认 workspace（workspaces/default/）
+# 先确认 docs 目录和 kb_id（如用户未指定则用 default）
+```
+
+如果 `docs/` 为空，提示用户先放入文档后再继续。
+
+### 第二步：生成知识树
+
+```bash
+# 默认 workspace
 python ${CLAUDE_SKILL_DIR}/scripts/plan_structure.py
 
 # 指定 workspace
 python ${CLAUDE_SKILL_DIR}/scripts/plan_structure.py --kb <kb_id>
 ```
 
-脚本会调用 Claude API 分析文档内容，输出结构化的知识树 JSON，保存到 `workspaces/<kb_id>/knowledge_tree.json`。
+脚本调用 Claude API（`ANTHROPIC_API_KEY` 必须已配置）分析文档内容，
+输出结构化 JSON 并打印 Markdown 大纲。
 
-如果脚本因环境问题无法运行，你也可以直接在对话中分析文档内容，
-按照下面的 JSON 格式手动生成知识树，然后写入 `workspaces/<kb_id>/knowledge_tree.json`。
+如果脚本因环境原因无法运行（无 API key、无网络），可直接在对话中分析文档内容，
+按 `references/tree_schema.md` 中的 JSON 格式手动生成知识树。
 
-### 第三步：展示并确认
+### 第三步：预览并确认
 
-将知识树以 Markdown 大纲形式展示给用户，例如：
+将脚本输出的 Markdown 大纲展示给用户，格式如下：
 
 ```
+📋 知识树预览（workspace: default）
+
 - LLM 知识库
   - 预训练
-    - Tokenizer: 分词器原理与 BPE/WordPiece/Unigram 对比
+    - Tokenizer: BPE/WordPiece/Unigram 分词算法原理与对比
     - 数据工程: 预训练数据清洗、去重、质量过滤
   - 后训练
-    - SFT: 监督微调的数据构造与训练策略
+    - SFT: 监督微调的数据格式与训练策略
     - RLHF
-      - PPO: 近端策略优化算法
-      - GRPO: 组相对策略优化
+      - PPO: 近端策略优化算法原理
+      - GRPO: 组相对策略优化，DeepSeek 提出
+
+共 N 个节点，M 个叶子节点。
+
+---
+结构是否合理？可以告诉我需要增删哪些分类，或直接说"确认保存"。
 ```
 
-然后问用户：
-- 结构是否合理？需要增删哪些分类？
-- 层级深度是否合适？
-- 是否有遗漏的知识点？
+**等待用户明确确认后**再写入文件，不要提前保存。
 
 ### 第四步：保存
 
-用户确认后，将最终的知识树写入 `workspaces/<kb_id>/knowledge_tree.json`。
+用户说"确认"、"ok"、"保存"、"没问题"后，脚本已自动保存到
+`workspaces/<kb_id>/knowledge_tree.json`。
 
-## 知识树 JSON 格式
+如需应用用户的调整意见，直接修改 JSON 文件，或重新运行脚本。
 
-```json
-{
-  "title": "LLM 知识库",
-  "children": [
-    {
-      "title": "预训练",
-      "children": [
-        {"title": "Tokenizer", "summary": "BPE/WordPiece/Unigram 分词算法原理与对比"},
-        {"title": "数据工程", "summary": "预训练数据清洗、去重、质量过滤流程"}
-      ]
-    },
-    {
-      "title": "后训练",
-      "children": [
-        {"title": "SFT", "summary": "监督微调的数据格式与训练策略"},
-        {
-          "title": "RLHF",
-          "children": [
-            {"title": "PPO", "summary": "近端策略优化算法原理"},
-            {"title": "GRPO", "summary": "组相对策略优化，DeepSeek 提出"}
-          ]
-        }
-      ]
-    }
-  ]
-}
-```
+## 错误处理
 
-**节点字段说明：**
-- `title`（必需）：节点标题
-- `summary`（叶子节点必需）：知识点摘要，一两句话概括核心内容
-- `children`（可选）：子节点数组
-- `node_token` / `obj_token`：同步飞书后自动生成，规划阶段不需要
+| 错误 | 处理方式 |
+|------|---------|
+| `ANTHROPIC_API_KEY` 未设置 | 提示用户在 `.env` 中配置；可手动生成树 |
+| `docs/` 目录不存在或为空 | 提示用户放入文档 |
+| JSON 解析失败 | 显示原始输出，提示用户检查或手动修正 |
 
-## 规划原则
+## 参考
 
-1. **层次清晰**：2-3 级为主，最深不超过 4 级
-2. **分类合理**：参考 LLM 领域常见知识体系
-   - 预训练（数据、模型架构、训练方法）
-   - 后训练（SFT、RLHF/DPO/GRPO、对齐）
-   - 模型架构（Transformer、MoE、SSM）
-   - 推理优化（KV Cache、量化、推测解码）
-   - 应用（RAG、Agent、多模态、评估）
-3. **粒度适中**：每个叶子节点是一个可以独立成文的知识点
-4. **可扩展**：结构便于后续添加新的知识点和子分类
+- 知识树 JSON 格式与 LLM 分类参考 → `references/tree_schema.md`
+- 数据模型 → `CLAUDE.md` § Data Models

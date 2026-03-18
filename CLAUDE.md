@@ -195,15 +195,61 @@ Do not add embedding-based retrieval.
 
 ## Skill Registry
 
-| Skill | Auto-trigger conditions | Script | Side effects |
-|-------|------------------------|--------|-------------|
-| plan-wiki | User provides docs / asks to organize knowledge / 规划知识库 | `plan_structure.py` | Writes `workspaces/<kb_id>/knowledge_tree.json` |
-| sync-wiki | User says "sync to Feishu" / 同步到飞书 | `sync_to_feishu.py` | Creates Feishu wiki nodes; updates tree tokens |
-| ask-kb | AI/LLM technical question (Transformer, MoE, RLHF, RAG, etc.) | `search_kb.py` | None (read-only) |
-| archive | User says "归档" / "archive" / "save to KB" | `archive_to_kb.py` | Appends to node summary in tree JSON |
-| interview | User mentions 面试/笔试/机试/八股 | `manage_interview.py` | Writes to `workspaces/<kb_id>/interviews/` |
+| Skill | Trigger | Write ops | Confirm required | Script |
+|-------|---------|-----------|-----------------|--------|
+| plan-wiki | User explicitly asks to plan/build a knowledge base | `knowledge_tree.json` (overwrite) | Yes — preview outline first | `plan_structure.py` |
+| sync-wiki | User says "sync to Feishu" (manual only, `disable-model-invocation: true`) | Feishu wiki nodes + tree tokens | Yes — show node count + risk warning | `sync_to_feishu.py` |
+| ask-kb | AI/ML/LLM technical question in ClawKnow context | None (read-only) | No | `search_kb.py` |
+| archive | User explicitly says "归档" / "save to KB" | `knowledge_tree.json` (append summary) | Yes — preview archiving plan | `archive_to_kb.py` |
+| interview | User mentions interview / 面试 / 八股 context | `interviews/*.json`; Feishu (on sync) | Save: yes; Sync: yes | `manage_interview.py` |
 
 SKILL.md files are written in Chinese. All scripts and code comments are in English.
+
+### Skill Structure Convention
+
+Each skill folder contains:
+```
+.claude/skills/<skill-name>/
+├── SKILL.md               # Frontmatter (name, description, allowed-tools) + flow instructions
+├── scripts/               # Python data scripts
+│   └── <script>.py
+└── references/            # (Optional) Reference docs: schemas, style guides, examples
+    └── <ref>.md
+```
+
+`SKILL.md` body sections (standardized):
+1. **元数据** — purpose, inputs, outputs, side effects, confirm-required (table)
+2. **触发条件** — positive examples + counter-examples ("不触发")
+3. **执行流程** — numbered steps with bash commands
+4. **预览/确认协议** — preview template for write-heavy skills
+5. **错误处理** — error → action table
+
+### Skill Boundary and Composition
+
+```
+User input
+    │
+    ├─► plan-wiki ──────────────────────────► knowledge_tree.json (write)
+    │       │ (after plan)                          │
+    │       └─────────────────────────────────────► sync-wiki ──► Feishu wiki
+    │
+    ├─► ask-kb ──► search_kb.py (read) ──► answer
+    │       │
+    │       └─ (nudge) ──► archive ──────────────► knowledge_tree.json (append)
+    │                           │ (if node has obj_token)
+    │                           └─────────────────► sync-wiki (reminder only)
+    │
+    └─► interview ──► search_kb.py (read, borrows ask-kb script)
+                  ──► manage_interview.py save ──► interviews/*.json (write)
+                  ──► manage_interview.py sync ──► Feishu wiki
+```
+
+**Boundary rules:**
+- `ask-kb` is read-only. It never writes. Archiving is delegated to `archive`.
+- `archive` does not call `sync-wiki`. It only reminds the user to sync if needed.
+- `interview` reuses `ask-kb`'s `search_kb.py` script directly; it does not invoke the `ask-kb` skill.
+- `sync-wiki` is the only skill that writes to Feishu wiki nodes from the knowledge tree.
+- Only `plan-wiki` and `archive` write to `knowledge_tree.json`.
 
 ---
 

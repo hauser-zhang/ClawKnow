@@ -1,113 +1,149 @@
 ---
 name: interview
 description: >
-  管理面试、笔试、机试的记录，讨论面试题目的最佳回答，并关联知识库中的知识点。
-  当用户提到"面试"、"笔试"、"机试"、"面经"、"八股文"、"八股"、"算法题"、
-  "面试准备"、"XX 公司面试"、"今天面了"、"面试题"、"手撕代码"时自动触发。
-  支持创建面试记录、逐题讨论最佳答案、关联知识库节点、同步到飞书。
+  记录面试/笔试/机试经历，逐题讨论最佳答案，关联知识库节点，支持同步到飞书。
+  触发：用户提到"面试"、"笔试"、"机试"、"面经"、"八股文"、"今天面了"、"面试题"、
+  "XX 公司面试"、"帮我看看面试记录"、"面试准备"。
+  不触发：仅讨论某技术概念无面试背景（→ ask-kb）；
+  "归档"（→ archive）；"同步到飞书知识树"（→ sync-wiki）。
+  写操作：保存面试记录 JSON（需确认）；同步到飞书（需确认）。
 allowed-tools: Read, Bash(python *), WebSearch
 ---
 
 # 面试知识管理
 
-帮助用户记录面试经历、讨论题目答案，并关联到知识库。
+## 元数据
 
-## 场景一：用户刚面完试，要记录
+| 项目 | 内容 |
+|------|------|
+| 用途 | 记录面试题 → 讨论答案 → 关联知识库 → 保存 / 同步飞书 |
+| 输入 | 用户描述的面试经历或面试题目 |
+| 输出 | 面试记录 JSON 文件；飞书面试页面（按需）|
+| 副作用 | **写** `workspaces/<kb_id>/interviews/` 下的 JSON 文件；飞书写操作（按需）|
+| 需要确认 | 保存前确认；同步飞书前确认 |
 
-**对话示例**：
-> "我今天面试了字节的大模型岗，有几道题想讨论一下"
+## 触发条件
 
-**流程**：
+**会触发：**
+- "我今天面试了字节的大模型岗"
+- "帮我回顾一下这次笔试题"
+- "整理一下我的面经"
+- "帮我看看之前面试都考了些什么"
+- "八股文复习"
 
-1. 收集基本信息（如对话中未提及则主动询问）：
-   - 公司名称
-   - 日期（默认今天）
-   - 类型：面试 / 笔试 / 机试
-   - 岗位（如有）
+**不触发：**
+- "解释一下 MoE" — 无面试背景 → ask-kb
+- "归档一下" → archive
+- "同步知识库到飞书" → sync-wiki
 
-2. 逐个讨论面试题目：
-   - 用户描述遇到的问题
-   - 讨论分析，给出参考答案
-   - 对于八股题，先检索知识库（用 ask-kb 的 search_kb.py）
-   - 知识库没有或不够时联网搜索补充
-   - 确认最终答案
+## 场景一：记录刚结束的面试
 
-3. 每道题记录为：
-   ```json
-   {
-     "question": "问题描述",
-     "category": "八股 / 算法 / 系统设计 / 项目 / 其他",
-     "answer": "讨论后确认的最佳答案",
-     "kb_path": ["模型架构", "MoE"]
-   }
-   ```
-   其中 `kb_path` 是知识库中对应知识点的路径（如无对应则留空列表）。
+### 步骤 1：收集基本信息
 
-4. 所有题目讨论完成后，保存记录：
+如对话中未提及，主动询问：
+- 公司名称
+- 日期（默认今天）
+- 类型：面试 / 笔试 / 机试
+- 岗位（可选）
+
+### 步骤 2：逐题讨论
+
+对每道题：
+1. 用户描述题目
+2. 判断题目类型（八股 / 算法 / 系统设计 / 项目 / 其他）
+3. 对于八股/技术题：先检索知识库
    ```bash
-   # 默认 workspace
-   python ${CLAUDE_SKILL_DIR}/scripts/manage_interview.py save
-
-   # 指定 workspace
-   python ${CLAUDE_SKILL_DIR}/scripts/manage_interview.py save --kb <kb_id>
+   python ${CLAUDE_SKILL_DIR}/../ask-kb/scripts/search_kb.py "<关键词>"
    ```
-   通过 stdin 传入 JSON 数据。
+4. 给出参考答案；知识库不够时联网搜索补充
+5. 确认最终答案，记录到题目列表
 
-## 场景二：用户想准备面试
+### 步骤 3：预览并确认保存
 
-**对话示例**：
-> "帮我看看之前面试都考了些什么"
+所有题目讨论完成后，展示预览：
 
-**流程**：
+```
+📋 面试记录预览
 
-1. 列出历史记录：
-   ```bash
-   python ${CLAUDE_SKILL_DIR}/scripts/manage_interview.py list
-   # 或指定 workspace：
-   python ${CLAUDE_SKILL_DIR}/scripts/manage_interview.py list --kb <kb_id>
-   ```
-2. 展示各次面试的题目统计（八股 N 题、算法 N 题等）
-3. 分析高频考点，给出复习建议
-4. 关联到知识库中的薄弱环节
+  公司：字节跳动
+  日期：2026-03-18
+  类型：面试
+  岗位：大模型算法工程师
+  题目数：3 题（八股 2 题，算法 1 题）
+
+  题目列表：
+  1. [八股] MoE 的工作原理和路由机制
+  2. [算法] 实现 LRU Cache
+  3. [八股] RLHF 的训练流程
+
+---
+确认保存？（输入"确认"保存记录，或说明需要修改的内容）
+```
+
+### 步骤 4：保存记录
+
+用户确认后，构造 JSON 并通过 stdin 传入脚本：
+
+```bash
+# 默认 workspace
+python ${CLAUDE_SKILL_DIR}/scripts/manage_interview.py save
+
+# 指定 workspace
+python ${CLAUDE_SKILL_DIR}/scripts/manage_interview.py save --kb <kb_id>
+```
+
+JSON 格式参见 `references/record_schema.md`。
+
+## 场景二：查看历史记录 / 面试准备
+
+### 步骤 1：列出历史记录
+
+```bash
+python ${CLAUDE_SKILL_DIR}/scripts/manage_interview.py list
+# 指定 workspace：
+python ${CLAUDE_SKILL_DIR}/scripts/manage_interview.py list --kb <kb_id>
+```
+
+### 步骤 2：分析高频考点
+
+统计各类别题目频率，找出薄弱环节，给出复习建议：
+- 结合知识库（哪些知识点被考到但没有记录）
+- 指出"算法题考了 N 次，知识库中尚无算法专题"等洞察
 
 ## 场景三：同步面试记录到飞书
 
-当用户要求同步时：
+### 步骤 1：预览并确认
+
+```
+⚠️  飞书同步操作
+
+  将在飞书创建"面试记录"父节点，并为每条记录创建子页面。
+  此操作不可逆，重复运行会创建重复节点。
+
+  待同步记录：N 条
+  目标空间：<FEISHU_WIKI_SPACE_ID>
+
+---
+确认同步？（输入"确认同步"继续）
+```
+
+### 步骤 2：执行同步
+
 ```bash
 python ${CLAUDE_SKILL_DIR}/scripts/manage_interview.py sync
-# 或指定 workspace：
+# 指定 workspace：
 python ${CLAUDE_SKILL_DIR}/scripts/manage_interview.py sync --kb <kb_id>
 ```
 
-会在飞书知识库中创建"面试记录"父节点，每次面试一个子页面。
+## 错误处理
 
-## 面试记录 JSON 格式
+| 错误 | 处理方式 |
+|------|---------|
+| 知识库不存在 | 仍可记录面试，kb_path 留空 |
+| 飞书凭证未配置 | 提示配置 `.env`；仍可本地保存 |
+| 错误码 99991672 | Bot 未加为飞书空间成员 |
 
-```json
-{
-  "company": "字节跳动",
-  "date": "2026-03-18",
-  "type": "面试",
-  "position": "大模型算法工程师",
-  "questions": [
-    {
-      "question": "解释 MoE 的工作原理和路由机制",
-      "category": "八股",
-      "answer": "MoE 通过路由网络将输入分配给不同专家...",
-      "kb_path": ["模型架构", "MoE"]
-    },
-    {
-      "question": "实现 LRU Cache",
-      "category": "算法",
-      "answer": "使用 OrderedDict 或双向链表+哈希表...",
-      "kb_path": []
-    }
-  ]
-}
-```
+## 参考
 
-## 存储位置
-
-- 面试记录保存在 `workspaces/<kb_id>/interviews/` 目录（默认 kb_id = `default`）
-- 每条记录一个 JSON 文件
-- 命名格式：`YYYYMMDD_HHMMSS_公司名.json`
+- 记录 JSON 格式 → `references/record_schema.md`
+- 数据存储位置 → `workspaces/<kb_id>/interviews/YYYYMMDD_HHMMSS_<company>.json`
