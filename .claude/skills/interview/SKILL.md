@@ -45,7 +45,11 @@ allowed-tools: Read, Bash(python *), WebSearch
 
 4. 所有题目讨论完成后，保存记录：
    ```bash
+   # 默认 workspace
    python ${CLAUDE_SKILL_DIR}/scripts/manage_interview.py save
+
+   # 指定 workspace
+   python ${CLAUDE_SKILL_DIR}/scripts/manage_interview.py save --kb <kb_id>
    ```
    通过 stdin 传入 JSON 数据。
 
@@ -59,6 +63,8 @@ allowed-tools: Read, Bash(python *), WebSearch
 1. 列出历史记录：
    ```bash
    python ${CLAUDE_SKILL_DIR}/scripts/manage_interview.py list
+   # 或指定 workspace：
+   python ${CLAUDE_SKILL_DIR}/scripts/manage_interview.py list --kb <kb_id>
    ```
 2. 展示各次面试的题目统计（八股 N 题、算法 N 题等）
 3. 分析高频考点，给出复习建议
@@ -69,6 +75,8 @@ allowed-tools: Read, Bash(python *), WebSearch
 当用户要求同步时：
 ```bash
 python ${CLAUDE_SKILL_DIR}/scripts/manage_interview.py sync
+# 或指定 workspace：
+python ${CLAUDE_SKILL_DIR}/scripts/manage_interview.py sync --kb <kb_id>
 ```
 
 会在飞书知识库中创建"面试记录"父节点，每次面试一个子页面。
@@ -100,6 +108,6 @@ python ${CLAUDE_SKILL_DIR}/scripts/manage_interview.py sync
 
 ## 存储位置
 
-- 面试记录保存在 `data/interviews/` 目录
+- 面试记录保存在 `workspaces/<kb_id>/interviews/` 目录（默认 kb_id = `default`）
 - 每条记录一个 JSON 文件
 - 命名格式：`YYYYMMDD_HHMMSS_公司名.json`

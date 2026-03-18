@@ -25,13 +25,17 @@ allowed-tools: Read, Glob, Bash(python *)
 运行规划脚本：
 
 ```bash
+# 默认 workspace（workspaces/default/）
 python ${CLAUDE_SKILL_DIR}/scripts/plan_structure.py
+
+# 指定 workspace
+python ${CLAUDE_SKILL_DIR}/scripts/plan_structure.py --kb <kb_id>
 ```
 
-脚本会调用 Claude API 分析文档内容，输出结构化的知识树 JSON。
+脚本会调用 Claude API 分析文档内容，输出结构化的知识树 JSON，保存到 `workspaces/<kb_id>/knowledge_tree.json`。
 
 如果脚本因环境问题无法运行，你也可以直接在对话中分析文档内容，
-按照下面的 JSON 格式手动生成知识树，然后写入 `data/knowledge_tree.json`。
+按照下面的 JSON 格式手动生成知识树，然后写入 `workspaces/<kb_id>/knowledge_tree.json`。
 
 ### 第三步：展示并确认
 
@@ -56,7 +60,7 @@ python ${CLAUDE_SKILL_DIR}/scripts/plan_structure.py
 
 ### 第四步：保存
 
-用户确认后，将最终的知识树写入 `data/knowledge_tree.json`。
+用户确认后，将最终的知识树写入 `workspaces/<kb_id>/knowledge_tree.json`。
 
 ## 知识树 JSON 格式
 

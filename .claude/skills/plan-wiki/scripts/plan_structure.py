@@ -1,5 +1,6 @@
 """Read docs/ and generate a knowledge tree structure using Claude API."""
 
+import argparse
 import json
 import sys
 from pathlib import Path
@@ -7,10 +8,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from lib import config  # noqa: E402
-
-TREE_PATH = PROJECT_ROOT / "data" / "knowledge_tree.json"
-DOCS_DIR = PROJECT_ROOT / "docs"
+from lib import config, workspace  # noqa: E402
 
 PLAN_PROMPT = """\
 你是一个知识库架构师。请分析以下文档内容，生成一个结构化的知识库树。
@@ -39,19 +37,19 @@ PLAN_PROMPT = """\
 """
 
 
-def load_docs() -> str:
-    """Read all doc files from docs/ and concatenate."""
-    if not DOCS_DIR.exists():
-        print("ERROR: docs/ directory not found.")
+def load_docs(docs_dir: Path) -> str:
+    """Read all doc files from docs_dir and concatenate."""
+    if not docs_dir.exists():
+        print(f"ERROR: docs directory not found: {docs_dir}")
         sys.exit(1)
 
     parts = []
-    for f in sorted(DOCS_DIR.iterdir()):
+    for f in sorted(docs_dir.iterdir()):
         if f.suffix in (".md", ".txt", ".rst"):
             parts.append(f"# {f.name}\n\n{f.read_text(encoding='utf-8')}")
 
     if not parts:
-        print("ERROR: No .md/.txt/.rst files found in docs/.")
+        print(f"ERROR: No .md/.txt/.rst files found in {docs_dir}.")
         sys.exit(1)
 
     return "\n\n---\n\n".join(parts)
@@ -91,18 +89,30 @@ def tree_to_outline(node: dict, depth: int = 0) -> str:
     return "\n".join(lines)
 
 
-def main():
-    content = load_docs()
-    print(f"Read {content.count('# ')} document(s) from docs/. Analyzing...")
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Plan knowledge tree structure from docs")
+    parser.add_argument(
+        "--kb",
+        default=workspace.DEFAULT_KB_ID,
+        metavar="KB_ID",
+        help=f"Workspace ID (default: {workspace.DEFAULT_KB_ID})",
+    )
+    args = parser.parse_args()
+
+    tree_path = workspace.get_tree_path(PROJECT_ROOT, args.kb)
+    docs_dir = workspace.get_docs_dir(PROJECT_ROOT, args.kb)
+
+    content = load_docs(docs_dir)
+    print(f"[kb={args.kb}] Read {content.count('# ')} document(s) from {docs_dir}. Analyzing...")
 
     tree = generate_tree(content)
 
-    TREE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    TREE_PATH.write_text(json.dumps(tree, ensure_ascii=False, indent=2), encoding="utf-8")
+    tree_path.parent.mkdir(parents=True, exist_ok=True)
+    tree_path.write_text(json.dumps(tree, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    print("\nGenerated knowledge tree:\n")
+    print(f"\nGenerated knowledge tree:\n")
     print(tree_to_outline(tree))
-    print(f"\nSaved to {TREE_PATH}")
+    print(f"\nSaved to {tree_path}")
 
 
 if __name__ == "__main__":

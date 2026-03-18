@@ -1,15 +1,15 @@
-# feishu-know-llm
+# ClawKnow
 
-AI-powered Feishu (Lark) knowledge base manager built with Claude Code skills and Python.
+AI-powered, Claude-native Feishu knowledge base manager — supporting multiple isolated workspaces.
 
-Turn your LLM study notes into a structured Feishu wiki — with intelligent Q&A, discussion archiving, and interview prep management.
+Turn your LLM study notes into a structured Feishu wiki, with intelligent Q&A, discussion archiving, interview prep management, and **multi-knowledge-base isolation**.
 
 ## Features
 
 All features are triggered by natural language — just talk to Claude:
 
 | Skill | Auto-triggers when you... | What it does |
-|-------|--------------------------|------|
+|-------|--------------------------|--------------|
 | plan-wiki | Provide docs, ask to organize knowledge | Analyzes docs → generates a structured knowledge tree |
 | sync-wiki | Say "sync to Feishu" (manual `/sync-wiki`) | Creates wiki nodes in Feishu from the knowledge tree |
 | ask-kb | Ask any AI/LLM technical question | Searches KB first, supports web search fallback |
@@ -21,8 +21,8 @@ All features are triggered by natural language — just talk to Claude:
 ### 1. Clone and install
 
 ```bash
-git clone https://github.com/your-username/feishu-know-llm.git
-cd feishu-know-llm
+git clone https://github.com/hauser-zhang/ClawKnow.git
+cd ClawKnow
 pip install -e .
 ```
 
@@ -48,13 +48,61 @@ Enable these scopes for your Feishu app:
 - `wiki:wiki` — Wiki read/write
 - `docx:document` — Document read/write
 
-**Important**: After creating the app, add the bot as a member of your wiki space (Settings → Members → Add app).
+**Important**: After creating the app, add the bot as a member of your wiki space
+(Settings → Members → Add app).
 
 ### 4. Test connection
 
 ```bash
 python -m lib.feishu
 ```
+
+## Workspaces
+
+ClawKnow supports multiple isolated knowledge bases, each in its own workspace directory.
+
+### Default workspace
+
+Out of the box, everything goes into `workspaces/default/`.
+No extra configuration is needed — all skills default to `--kb default`.
+
+### Create a new workspace
+
+1. Create the directory structure:
+
+```bash
+mkdir -p workspaces/my-project/interviews
+```
+
+2. Create `workspaces/my-project/kb.yaml`:
+
+```yaml
+id: my-project
+name: My Project KB
+description: Notes for project X
+docs_dir: docs/my-project     # relative to project root
+feishu_space_id: ""           # leave empty to use global FEISHU_WIKI_SPACE_ID
+created_at: "2026-03-18"
+```
+
+3. Use the `--kb` flag when invoking skills (Claude handles this automatically
+   once you mention the workspace name):
+
+```bash
+python .claude/skills/plan-wiki/scripts/plan_structure.py --kb my-project
+python .claude/skills/ask-kb/scripts/search_kb.py --kb my-project "your query"
+```
+
+### Migrate from legacy layout (v0 → v1)
+
+If you used ClawKnow before the multi-workspace update, run:
+
+```bash
+python tools/migrate_legacy.py
+```
+
+This copies `data/knowledge_tree.json` and `data/interviews/*.json` into
+`workspaces/default/` without deleting the originals.
 
 ## Usage
 
@@ -64,13 +112,15 @@ Open Claude Code in this project directory and just talk naturally:
 
 > 我整理了一些 LLM 的笔记放在 docs/ 里了，帮我规划一下知识库结构
 
-Claude reads your docs, generates a knowledge tree, shows you the outline, and saves it after your confirmation.
+Claude reads your docs, generates a knowledge tree, shows you the outline, and saves it
+after your confirmation.
 
 ### Ask questions
 
 > MoE 和 Dense Model 有什么区别？各自的优缺点是什么？
 
-Claude searches the knowledge base first, answers based on what it finds, and offers to search the web if the KB content is insufficient.
+Claude searches the knowledge base first, answers based on what it finds, and offers to
+search the web if the KB content is insufficient.
 
 > 帮我搜一下最新的 MoE 相关论文
 
@@ -84,39 +134,36 @@ Claude summarizes the discussion and saves key points into the appropriate KB no
 
 > 我今天面试了字节的大模型岗，有几道题想讨论一下
 
-Claude enters interview mode — records each question, discusses best answers, links to KB knowledge points, and saves the record.
+Claude enters interview mode — records each question, discusses best answers, links to KB
+knowledge points, and saves the record.
 
 ## Project Structure
 
 ```
-feishu-know-llm/
+ClawKnow/
 ├── lib/                                # Shared Python modules
 │   ├── config.py                       # Env var loader
-│   └── feishu.py                       # Feishu API wrapper
+│   ├── feishu.py                       # Feishu API wrapper (lark-oapi)
+│   └── workspace.py                    # Workspace resolver (multi-KB)
+├── workspaces/                         # One directory per knowledge base
+│   └── default/                        # Default workspace
+│       ├── kb.yaml                     # Workspace metadata (tracked)
+│       ├── knowledge_tree.json         # Local tree cache (gitignored)
+│       └── interviews/                 # Interview records (gitignored)
 ├── .claude/skills/                     # Claude Code skills
-│   ├── skill-creator/                  # Official skill-creator (from anthropics/skills)
-│   ├── plan-wiki/                      # Knowledge tree planning
-│   │   ├── SKILL.md
-│   │   └── scripts/plan_structure.py
-│   ├── sync-wiki/                      # Sync to Feishu
-│   │   ├── SKILL.md
-│   │   └── scripts/sync_to_feishu.py
-│   ├── ask-kb/                         # Knowledge base Q&A
-│   │   ├── SKILL.md
-│   │   └── scripts/search_kb.py
-│   ├── archive/                        # Archive discussions
-│   │   ├── SKILL.md
-│   │   └── scripts/archive_to_kb.py
-│   └── interview/                      # Interview management
-│       ├── SKILL.md
-│       └── scripts/manage_interview.py
+│   ├── skill-creator/                  # Official skill lifecycle tool
+│   ├── plan-wiki/
+│   ├── sync-wiki/
+│   ├── ask-kb/
+│   ├── archive/
+│   └── interview/
+├── tools/
+│   └── migrate_legacy.py               # v0 → v1 migration helper
 ├── docs/                               # Your raw study documents
-├── data/                               # Local data (gitignored)
-│   ├── knowledge_tree.json
-│   └── interviews/
 ├── .env.example
 ├── pyproject.toml
-└── CLAUDE.md
+├── CLAUDE.md                           # Claude Code project instructions
+└── CLAUDE_CN.md                        # Chinese owner guide
 ```
 
 ## Knowledge Tree Example
@@ -128,7 +175,6 @@ Auto-generated structure from your LLM study notes:
   - Pre-training
     - Tokenizer: BPE / WordPiece / Unigram
     - Data Engineering: cleaning, dedup, filtering
-    - Training: learning rate schedules, mixed precision
   - Post-training
     - SFT: supervised fine-tuning
     - RLHF

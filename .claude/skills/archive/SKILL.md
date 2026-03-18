@@ -25,7 +25,7 @@ allowed-tools: Read, Bash(python *)
 
 ### 第二步：定位目标节点
 
-1. 读取 `data/knowledge_tree.json`
+1. 读取 `workspaces/<kb_id>/knowledge_tree.json`（默认 kb_id = `default`）
 2. 判断内容应归入哪个节点
 3. 可能的情况：
    - **匹配现有节点**：直接追加到该节点的 summary
@@ -53,12 +53,16 @@ allowed-tools: Read, Bash(python *)
 用户确认后运行：
 
 ```bash
+# 默认 workspace
 python ${CLAUDE_SKILL_DIR}/scripts/archive_to_kb.py "<节点路径>" "<归档内容>"
+
+# 指定 workspace
+python ${CLAUDE_SKILL_DIR}/scripts/archive_to_kb.py --kb <kb_id> "<节点路径>" "<归档内容>"
 ```
 
 路径用 `>` 分隔，如 `"模型架构>MoE"`。
 
-如果需要创建新节点，直接编辑 `data/knowledge_tree.json`。
+如果需要创建新节点，直接编辑 `workspaces/<kb_id>/knowledge_tree.json`。
 
 ### 第五步：后续提示
 

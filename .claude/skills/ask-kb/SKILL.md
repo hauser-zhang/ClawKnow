@@ -23,7 +23,11 @@ allowed-tools: Read, Bash(python *), WebSearch
 **第一步：检索知识库**
 
 ```bash
+# 默认 workspace
 python ${CLAUDE_SKILL_DIR}/scripts/search_kb.py "关键词"
+
+# 指定 workspace
+python ${CLAUDE_SKILL_DIR}/scripts/search_kb.py --kb <kb_id> "关键词"
 ```
 
 将用户问题中的核心关键词（如"MoE"、"GRPO"）传入脚本搜索。
@@ -75,4 +79,5 @@ python ${CLAUDE_SKILL_DIR}/scripts/search_kb.py "关键词"
 
 ## 参考
 
-知识树存储在 `data/knowledge_tree.json`，格式见 plan-wiki skill 的文档。
+知识树存储在 `workspaces/<kb_id>/knowledge_tree.json`，格式见 plan-wiki skill 的文档。
+默认 workspace ID 为 `default`；如用户有多个知识库，询问目标 kb_id 后加 `--kb` 参数。

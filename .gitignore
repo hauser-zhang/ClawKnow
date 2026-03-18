@@ -5,6 +5,13 @@ __pycache__/
 dist/
 *.egg-info/
 .ruff_cache/
+
+# Legacy single-KB paths (v0)
 data/knowledge_tree.json
 data/interviews/*.json
+
+# Multi-workspace data (v1) — kb configs (kb.yaml) are tracked; data files are not
+workspaces/*/knowledge_tree.json
+workspaces/*/interviews/*.json
+
 *-workspace/

@@ -7,15 +7,49 @@
 
 ## 项目定位
 
-这是一个**完全由 Claude 驱动的个人知识库系统**，核心目标是：
+**ClawKnow** 是一个**完全由 Claude 驱动的多知识库管理系统**，核心目标是：
 
 - 把你散乱的 LLM 学习笔记自动整理成飞书知识库（多层级页面结构）
 - 在学习过程中随时提问，Claude 先查本地知识库再回答，不够再联网
 - 把每次对话中的要点一句话"归档"进知识库，避免知识流失
 - 记录面试/笔试经历，关联到知识库节点，同步到飞书
+- **支持多个相互隔离的知识库**（例如：LLM 笔记 / 工作项目 / 读书笔记）
 
 **关键理念**：Claude 本身就是智能层，Python 脚本只是数据读写工具。
 你不需要部署任何模型服务，不需要向量数据库，不需要 RAG 框架。
+
+---
+
+## 为什么需要多 workspace（知识库隔离）
+
+v0 版本只有一个全局知识库（`data/knowledge_tree.json`），带来几个问题：
+
+1. **主题混杂**：LLM 笔记、面试记录、工作项目笔记全混在一棵树里，搜索精度差
+2. **飞书空间绑定死**：所有内容只能同步到一个飞书 wiki 空间
+3. **无法并行管理多个学习方向**：比如同时维护"LLM 知识库"和"系统设计知识库"
+
+v1 的 workspace 模型解决这些问题：每个知识库 = 一个独立目录，有自己的树、面试记录、
+可选的飞书空间绑定，互不干扰。
+
+---
+
+## `kb.yaml` 工作原理
+
+每个 workspace 目录下有一个 `kb.yaml` 文件（会提交到 git），它是这个知识库的配置文件：
+
+```yaml
+id: default               # 必须和目录名一致
+name: LLM 知识库          # 显示用的名称
+description: 我的 LLM 学习笔记
+docs_dir: docs            # 相对于项目根目录；plan-wiki 从这里读文档
+feishu_space_id: ""       # 留空 = 用 .env 里的全局 FEISHU_WIKI_SPACE_ID
+                          # 填了 = 只有这个知识库同步到这个飞书空间
+created_at: "2026-03-18"
+```
+
+`kb.yaml` 是版本控制的（它定义知识库的"元数据"），
+而知识树数据（`knowledge_tree.json`）和面试记录（`interviews/*.json`）是 gitignore 掉的
+（它们是你的私人内容，不应该进代码库）。
 
 ---
 
@@ -31,69 +65,63 @@
 | 不部署本地模型服务 | 个人知识库不需要 Ollama/vLLM；Claude Code 就是推理引擎 |
 | 不创建 `src/` 目录 | 逻辑在各 skill 的 `scripts/` 里，共享代码在 `lib/`，结构清晰 |
 | 飞书 API 可以用 | `lark-oapi` 是官方 SDK，这是允许的外部服务依赖 |
-
----
-
-## 为什么暂时不接更多付费大模型 API
-
-整个项目里**只有一处**调用了 Claude API：
-`plan-wiki` skill 里的 `plan_structure.py`，用来把你的笔记文档解析成知识树 JSON。
-
-其他所有"智能"——问答、归档建议、面试分析——都是 **Claude Code 对话上下文本身**提供的，
-完全不需要额外 API 调用。这意味着：
-
-- **零额外费用**：除了 Claude Code 的正常使用，不产生额外 API 账单
-- **零延迟开销**：搜索结果直接展示给对话中的 Claude，无需二次调用
-- **可理解性强**：每步发生了什么你都能看到，没有黑箱模型调用链
-
-如果未来检索规模变大（几千个知识点以上），可以升级到 SQLite FTS5 全文检索，
-但仍然不需要向量 Embedding。
+| `pyyaml` 是允许的 | 它是格式解析库，不是模型 API；用于读写 `kb.yaml` |
 
 ---
 
 ## 用到的技术栈与基本原理
 
-### Python 脚本（数据层）
+### Python 共享模块（`lib/`）
 
 | 文件 | 作用 |
 |------|------|
 | `lib/config.py` | 从 `.env` 读取飞书/Anthropic 配置 |
 | `lib/feishu.py` | 封装飞书 Wiki V2 + Docx V1 API |
-| `plan-wiki/scripts/plan_structure.py` | 读 `docs/`，调用 Claude API，生成 `data/knowledge_tree.json` |
-| `sync-wiki/scripts/sync_to_feishu.py` | 读树 JSON，递归创建飞书节点，写回 node_token |
-| `ask-kb/scripts/search_kb.py` | 关键词匹配搜索树，返回 top-10 结果给 Claude |
-| `archive/scripts/archive_to_kb.py` | 按路径定位节点，追加内容到 summary |
-| `interview/scripts/manage_interview.py` | 保存/列出/同步面试记录 JSON |
+| `lib/workspace.py` | **新增**：workspace 路径解析、`kb.yaml` 读写、workspace 初始化 |
 
-### 知识树结构（`data/knowledge_tree.json`）
+### 各 skill 脚本
+
+| 脚本 | 变化 |
+|------|------|
+| `plan_structure.py` | 新增 `--kb` 参数；docs_dir 从 `kb.yaml` 读取 |
+| `sync_to_feishu.py` | 新增 `--kb` 参数；可读取 workspace 的 feishu_space_id |
+| `search_kb.py` | 新增 `--kb` 参数 |
+| `archive_to_kb.py` | 新增 `--kb` 参数 |
+| `manage_interview.py` | 新增 `--kb` 参数；面试记录存到对应 workspace 目录 |
+
+所有脚本默认 `--kb default`，旧用法完全兼容。
+
+### 目录结构（v1）
 
 ```
-知识库（根节点）
-├── 大方向A
-│   ├── 子类A1
-│   │   ├── 知识点（有 summary）
-│   │   └── 知识点（有 summary）
-│   └── 子类A2
-└── 大方向B
-    └── ...
+workspaces/
+├── default/                  # 默认知识库（适合大多数人只用一个知识库的场景）
+│   ├── kb.yaml               # 配置文件，进 git
+│   ├── knowledge_tree.json   # 知识树，gitignored
+│   └── interviews/           # 面试记录，gitignored
+└── work-notes/               # 示例：第二个知识库
+    ├── kb.yaml
+    ├── knowledge_tree.json
+    └── interviews/
 ```
 
-每个节点的字段：`title`、`summary`（可选）、`children`（可选）、
-`node_token` 和 `obj_token`（同步飞书后才有）。
+---
 
-### 路径表示法
+## 从 v0 迁移到 v1（迁移路径）
 
-归档时用 `"大方向 > 子类 > 知识点"` 这种格式定位节点，例如：
-`"后训练 > RLHF > PPO"`
+如果你之前已经在用 ClawKnow（v0，只有 `data/` 目录），执行一次迁移脚本即可：
 
-### 检索原理
+```bash
+python tools/migrate_legacy.py
+```
 
-`search_kb.py` 做的是简单子串匹配：
-- 命中 title：+3 分
-- 命中 summary：+1 分
-- 按分数倒排，返回前 10 条
+脚本会：
+1. 创建 `workspaces/default/` 目录和 `kb.yaml`
+2. 把 `data/knowledge_tree.json` 复制到 `workspaces/default/knowledge_tree.json`
+3. 把 `data/interviews/*.json` 复制到 `workspaces/default/interviews/`
 
-结果直接展示在 Claude 的对话上下文里，由 Claude 负责理解和组织答案。
+**注意**：脚本只复制，不删除原文件，可以多次运行。
+迁移后你可以手动删除 `data/`（确认 workspace 数据正确后）。
 
 ---
 
@@ -106,7 +134,7 @@ Claude 读 CLAUDE.md（了解约束和结构）
        ↓
 Claude 修改/新增代码
        ↓
-如果架构/模型/约束有变化
+如果架构/数据模型/约束有变化
        ↓
 Claude 同步更新 CLAUDE.md 和 CLAUDE_CN.md
        ↓
@@ -122,40 +150,39 @@ Claude 同步更新 CLAUDE.md 和 CLAUDE_CN.md
 
 ## 你每次改代码前应该先做什么
 
-1. **看一眼 CLAUDE.md** 里的"Non-Goals and Constraints"部分，确认你的想法不违反约束
-2. **确认路径深度**：如果要新建 skill，记得脚本里用 `Path(__file__).resolve().parents[4]` 获取项目根目录
-3. **同步到飞书前一定要确认**：`sync-wiki` 不是幂等的，跑两次会创建重复节点
-4. **新增共享代码**：只有 2 个以上 skill 用到才放进 `lib/`，否则放在 skill 自己的 `scripts/` 里
+1. **看一眼 CLAUDE.md** 里的"Non-Goals and Constraints"，确认你的想法不违反约束
+2. **确认路径深度**：脚本用 `Path(__file__).resolve().parents[4]` 找项目根目录（深度固定为 4）
+3. **新建 workspace**：用 `lib.workspace.init_workspace()` 或参考 `workspaces/default/` 手动创建
+4. **同步到飞书前一定要确认**：不幂等，跑两次会创建重复节点
+5. **新增共享代码**：只有 2 个以上 skill 用到才放进 `lib/`，否则放在 skill 自己的 `scripts/` 里
 
 ---
 
 ## 目前的限制
 
-1. **检索质量有限**：只做子串匹配，中文分词不好，复杂查询可能漏掉相关节点。
-   目前知识量小，够用；如果节点超过几百个，考虑升级到 SQLite FTS5。
+1. **检索质量有限**：子串匹配，中文分词不好，复杂查询可能漏节点。
+   如果节点超过几百个，考虑升级到 SQLite FTS5（不需要 Embedding）。
 
-2. **同步不幂等**：`sync-wiki` 跑两次 = 飞书里出现两份一样的内容。
-   **每次同步前必须手动确认。**
+2. **同步不幂等**：`sync-wiki` 跑两次 = 飞书里出现两份。**每次同步前必须确认。**
 
-3. **只能写飞书，不能读回**：`lib/feishu.py` 有 `get_raw_content` 函数，
-   但目前没有任何 skill 把飞书内容读回本地树。知识库的权威数据源是本地 JSON，不是飞书。
+3. **只能写飞书，不能读回**：知识库的权威数据源是本地 JSON，不是飞书。
 
-4. **没有增量同步**：每次都是全量创建，不会跳过已经存在 `node_token` 的节点
-   （这个可以改，但目前没做）。
+4. **没有增量同步**：每次全量创建，不会跳过已有 `node_token` 的节点。
 
-5. **`plan_structure.py` 需要 `ANTHROPIC_API_KEY`**：这是项目里唯一需要 API key 的地方。
-   没有 key 就没法从文档生成知识树。其他所有功能不需要这个 key。
+5. **`plan_structure.py` 需要 `ANTHROPIC_API_KEY`**：项目里唯一需要 API key 的地方。
+   其他所有功能不需要。
+
+6. **feishu_space_id 覆盖是进程级的**：每次运行脚本时临时覆盖，不持久化到 config。
 
 ---
 
 ## 下一步建议
 
-以下是一些有价值的改进方向，等你需要时再做：
-
 | 优先级 | 功能 | 说明 |
 |--------|------|------|
-| 高 | FTS5 检索升级 | 把 knowledge_tree.json 建 SQLite FTS5 索引，提升中文检索质量 |
-| 高 | 增量同步 | 同步前检查 node_token 是否已存在，避免重复创建 |
-| 中 | 面试总结页 | 把面试 JSON 生成一份 Markdown 摘要，写入飞书节点正文 |
-| 中 | skill-creator 评估 | 对每个 skill 跑一次 skill-creator benchmark，改进触发描述质量 |
-| 低 | 飞书内容读回 | 把飞书页面内容同步回本地树的 summary 字段（双向同步） |
+| 高 | FTS5 检索升级 | 用 SQLite FTS5 索引替代子串匹配，提升中文检索质量 |
+| 高 | 增量同步 | 同步前检查 node_token 是否已存在，跳过已创建节点 |
+| 中 | 面试总结页 | 把面试 JSON 生成 Markdown 摘要，写入飞书节点正文 |
+| 中 | skill-creator 评估 | 对每个 skill 跑 benchmark，改进触发描述质量 |
+| 低 | `ws` CLI 小工具 | `python tools/ws.py new <kb_id>` 一行命令创建新 workspace |
+| 低 | 飞书内容读回 | 双向同步：把飞书页面内容同步回本地树的 summary 字段 |

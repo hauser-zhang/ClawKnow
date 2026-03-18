@@ -1,11 +1,14 @@
 """Search local knowledge tree for nodes matching a query."""
 
+import argparse
 import json
 import sys
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
-TREE_PATH = PROJECT_ROOT / "data" / "knowledge_tree.json"
+sys.path.insert(0, str(PROJECT_ROOT))
+
+from lib import workspace  # noqa: E402
 
 
 def search(node: dict, query: str, path: list[str] | None = None) -> list[dict]:
@@ -43,27 +46,34 @@ def search(node: dict, query: str, path: list[str] | None = None) -> list[dict]:
     return results
 
 
-def main():
-    if len(sys.argv) < 2:
-        print("Usage: python search_kb.py <query>")
-        sys.exit(1)
+def main() -> None:
+    """Parse args and run keyword search against the workspace knowledge tree."""
+    parser = argparse.ArgumentParser(description="Search knowledge base")
+    parser.add_argument("query", nargs="+", help="Search query keywords")
+    parser.add_argument(
+        "--kb",
+        default=workspace.DEFAULT_KB_ID,
+        metavar="KB_ID",
+        help=f"Workspace ID (default: {workspace.DEFAULT_KB_ID})",
+    )
+    args = parser.parse_args()
+    query = " ".join(args.query)
 
-    query = " ".join(sys.argv[1:])
-
-    if not TREE_PATH.exists():
-        print("Knowledge tree not found (data/knowledge_tree.json).")
+    tree_path = workspace.get_tree_path(PROJECT_ROOT, args.kb)
+    if not tree_path.exists():
+        print(f"Knowledge tree not found for workspace '{args.kb}' ({tree_path}).")
         print("Run plan-wiki first to build the knowledge tree.")
         sys.exit(0)
 
-    tree = json.loads(TREE_PATH.read_text(encoding="utf-8"))
+    tree = json.loads(tree_path.read_text(encoding="utf-8"))
     results = search(tree, query)
     results.sort(key=lambda r: r["score"], reverse=True)
 
     if not results:
-        print(f"No matches for '{query}' in knowledge tree.")
+        print(f"No matches for '{query}' in knowledge base '{args.kb}'.")
         sys.exit(0)
 
-    print(f"Found {len(results)} match(es) for '{query}':\n")
+    print(f"[kb={args.kb}] Found {len(results)} match(es) for '{query}':\n")
     for r in results[:10]:
         path_str = " > ".join(r["path"])
         print(f"  [{r['score']}] {path_str}")
