@@ -17,3 +17,6 @@ workspaces/*/kb_index.db
 workspaces/*/feishu_map.json
 
 *-workspace/
+
+# Personal owner guide (not for repo)
+CLAUDE_CN.md
