@@ -384,22 +384,22 @@ def print_report(report: SyncReport, kb_id: str, dry_run: bool) -> None:
     mode = "DRY-RUN" if dry_run else "APPLIED"
     print()
     print(f"Sync Report [{mode}]  kb={kb_id}  {report.finished_at or _now()}")
-    print("━" * 56)
+    print("-" * 56)
     if dry_run:
         print(f"  would create       : {report.created}")
         print(f"  would update       : {report.content_updated}")
         print(f"  would skip         : {report.skipped}")
     else:
-        print(f"  ✓ created          : {report.created}")
-        print(f"  ✓ content updated  : {report.content_updated}")
-        print(f"  → skipped          : {report.skipped}")
-        print(f"  ✗ failed           : {report.failed}")
+        print(f"  [OK] created       : {report.created}")
+        print(f"  [OK] updated       : {report.content_updated}")
+        print(f"  [--] skipped       : {report.skipped}")
+        print(f"  [!!] failed        : {report.failed}")
     if report.errors:
         print()
         print("  Errors:")
         for err in report.errors:
-            print(f"    ✗ {err}")
-    print("━" * 56)
+            print(f"    [!!] {err}")
+    print("-" * 56)
 
 
 # ---------------------------------------------------------------------------
