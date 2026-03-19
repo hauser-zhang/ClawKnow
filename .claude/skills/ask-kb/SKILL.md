@@ -44,7 +44,9 @@ allowed-tools: Read, Bash(python *), WebSearch
 
 ### 第一步：检索知识库
 
-提取用户问题的核心关键词（1–3 个）：
+提取用户问题的核心关键词（1–3 个）。脚本使用 FTS5 两阶段检索：
+Stage 1 匹配 KB 节点（BM25 排序），Stage 2 获取关联文档片段和归档记忆。
+索引如过期会自动重建（无需手动操作）。
 
 ```bash
 # 默认 workspace
@@ -53,6 +55,12 @@ python ${CLAUDE_SKILL_DIR}/scripts/search_kb.py "<关键词>"
 # 指定 workspace（用户提到某个知识库名称时）
 python ${CLAUDE_SKILL_DIR}/scripts/search_kb.py --kb <kb_id> "<关键词>"
 ```
+
+输出格式：
+- `[KB]` 行 — Stage 1 匹配到的知识库节点（含路径和摘要）
+- `[DOC]` 行 — Stage 2 相关文档片段（含来源文件）
+- `[MEM]` 行 — Stage 2 归档记忆（含归档日期）
+- `[GAP]` 行 — 知识空白提示（该问题在知识库中无节点，建议联网补充）
 
 ### 第二步：组织回答
 

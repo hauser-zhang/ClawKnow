@@ -1,6 +1,6 @@
 [project]
 name = "clawknow"
-version = "0.2.0"
+version = "0.3.0"
 description = "ClawKnow — Claude-native multi-workspace Feishu knowledge base manager"
 requires-python = ">=3.10"
 dependencies = [

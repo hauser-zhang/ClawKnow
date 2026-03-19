@@ -13,5 +13,7 @@ data/interviews/*.json
 # Multi-workspace data (v1) — kb configs (kb.yaml) are tracked; data files are not
 workspaces/*/knowledge_tree.json
 workspaces/*/interviews/*.json
+workspaces/*/kb_index.db
+workspaces/*/feishu_map.json
 
 *-workspace/

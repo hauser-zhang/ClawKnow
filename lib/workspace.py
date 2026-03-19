@@ -19,6 +19,7 @@ _WORKSPACES_DIR = "workspaces"
 
 
 def get_workspace_dir(project_root: Path, kb_id: str) -> Path:
+    """Return the workspace directory path for *kb_id*."""
     return project_root / _WORKSPACES_DIR / kb_id
 
 
@@ -37,10 +38,12 @@ def load_kb_config(project_root: Path, kb_id: str) -> dict:
 
 
 def get_tree_path(project_root: Path, kb_id: str) -> Path:
+    """Return path to knowledge_tree.json for *kb_id*."""
     return get_workspace_dir(project_root, kb_id) / "knowledge_tree.json"
 
 
 def get_interviews_dir(project_root: Path, kb_id: str) -> Path:
+    """Return path to the interviews directory for *kb_id*."""
     return get_workspace_dir(project_root, kb_id) / "interviews"
 
 
@@ -73,6 +76,20 @@ def list_workspaces(project_root: Path) -> list[dict]:
                 cfg = yaml.safe_load(f) or {}
             result.append(cfg)
     return result
+
+
+def get_index_path(project_root: Path, kb_id: str) -> Path:
+    """Return path to the FTS5 SQLite index database for this workspace."""
+    return get_workspace_dir(project_root, kb_id) / "kb_index.db"
+
+
+def get_map_path(project_root: Path, kb_id: str) -> Path:
+    """Return path to feishu_map.json for this workspace.
+
+    This file records the local-node → Feishu node_token/obj_token mapping
+    used by the idempotent sync logic to avoid duplicate node creation.
+    """
+    return get_workspace_dir(project_root, kb_id) / "feishu_map.json"
 
 
 def init_workspace(

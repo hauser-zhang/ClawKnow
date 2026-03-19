@@ -44,8 +44,9 @@ These are permanent hard constraints. Do not work around them.
 ClawKnow/
 ├── lib/
 │   ├── config.py          # Load .env vars; config.check() returns missing keys
-│   ├── feishu.py          # lark-oapi wrapper: list_spaces, list_nodes, create_node,
-│   │                      #   get_raw_content, get_blocks, append_text
+│   ├── feishu.py          # lark-oapi wrapper: list_spaces, list_nodes, list_nodes_all,
+│   │                      #   create_node, get_raw_content, get_blocks, append_text,
+│   │                      #   replace_doc_content
 │   └── workspace.py       # Multi-workspace resolver (see Workspace Model below)
 ├── .claude/
 │   └── skills/
@@ -86,6 +87,8 @@ Each workspace lives at `workspaces/<kb_id>/` and contains:
 |------|---------|---------|
 | `kb.yaml` | Yes | Workspace metadata and per-KB Feishu space override |
 | `knowledge_tree.json` | No | Local knowledge tree state |
+| `kb_index.db` | No | FTS5 SQLite index (auto-built by search_kb.py) |
+| `feishu_map.json` | No | Local-path → Feishu token mapping for idempotent sync |
 | `interviews/*.json` | No | Interview records |
 
 ### `kb.yaml` schema
@@ -115,6 +118,7 @@ Scripts import `lib.workspace` for all path operations:
 from lib import workspace
 
 tree_path      = workspace.get_tree_path(PROJECT_ROOT, kb_id)
+index_path     = workspace.get_index_path(PROJECT_ROOT, kb_id)
 interviews_dir = workspace.get_interviews_dir(PROJECT_ROOT, kb_id)
 docs_dir       = workspace.get_docs_dir(PROJECT_ROOT, kb_id)
 kb_cfg         = workspace.load_kb_config(PROJECT_ROOT, kb_id)
@@ -147,6 +151,43 @@ Single JSON object rooted at the top-level KB node. Every node has:
 
 Path notation (used by `archive`): `"大方向 > 子类 > 知识点"` — nodes joined by `" > "`.
 
+The `summary` field is now **generated** from typed memory records by
+`retrieval.regen_node_summary()` — do not hand-edit it; it will be overwritten
+on the next `archive` run.
+
+### Memory record
+
+Stored in `workspaces/<kb_id>/kb_index.db` → `memories` table.
+Indexed for full-text search in `fts_memories`.
+
+```jsonc
+{
+  "memory_id":   "sha256-derived stable id",
+  "type":        "concept | fact | insight | source_note | question | decision",
+  "content":     "string — the knowledge statement",
+  "kb_path":     "大方向 > 子类 > 知识点",
+  "source_refs": ["Paper: Vaswani 2017", "https://..."],  // optional
+  "author":      "claude | user",
+  "confidence":  "high | medium | low",
+  "created_at":  "ISO-8601",
+  "updated_at":  null                                     // reserved
+}
+```
+
+**Type semantics:**
+| Type | Use |
+|------|-----|
+| `concept` | Core definition or principle |
+| `fact` | Verifiable data point or behavior |
+| `insight` | Trade-off, comparison, or empirical conclusion |
+| `source_note` | Paper / article / project citation |
+| `question` | Open question awaiting verification |
+| `decision` | Project or practice decision |
+
+**Summary regeneration** (`retrieval.regen_node_summary()`): collects all
+`memories` rows for a `kb_path`, sorts by `_TYPE_ORDER`, and emits
+`[类型标签] content` lines.  No external API call.  Deterministic.
+
 ### Interview record
 
 Filename: `workspaces/<kb_id>/interviews/YYYYMMDD_HHMMSS_<company>.json`
@@ -171,25 +212,122 @@ Filename: `workspaces/<kb_id>/interviews/YYYYMMDD_HHMMSS_<company>.json`
 
 ## Retrieval Strategy
 
-Current implementation: **substring keyword search** on `title` (+3 per match) and `summary`
-(+1 per match), sorted descending, top 10 returned. See `ask-kb/scripts/search_kb.py`.
+### Architecture — two-stage FTS5 search
 
-This is intentionally simple. Claude reads the results and synthesizes the answer.
+Stage 1 searches `fts_nodes` (KB node title + summary) with BM25 ranking.
+Stage 2 retrieves supporting evidence for each matched node from `fts_chunks` and `fts_memories`.
+A global pass also fetches chunks/memories not yet linked to a KB node.
 
-**Future extension point (disabled, unimplemented):** SQLite FTS5 index over node title+summary
-for better CJK tokenization. Only add if the simple search demonstrably fails for the user.
-Do not add embedding-based retrieval.
+All retrieval is handled by `lib/retrieval.py`. `search_kb.py` auto-rebuilds the node index
+whenever `knowledge_tree.json` has changed (detected via SHA-256 hash stored in `index_state`).
+
+### Schema (`workspaces/<kb_id>/kb_index.db`)
+
+| Table | Type | Indexed columns | Purpose |
+|-------|------|----------------|---------|
+| `fts_nodes` | FTS5 | `title`, `summary` | KB node full-text search |
+| `fts_chunks` | FTS5 | `content` | Document chunk search |
+| `fts_memories` | FTS5 | `content` | Archived memory search index |
+| `memories` | Regular | — | Typed memory records (source of truth; see Data Models) |
+| `sources` | Regular | — | Doc metadata + content_hash (change detection) |
+| `index_state` | Regular | — | `tree_hash` for auto-rebuild detection |
+
+FTS5 tokenizer: `unicode61` — treats each CJK character as a separate token, which is
+meaningfully better than substring matching for Chinese text.
+
+### Provenance fields (unindexed, stored in FTS5 rows)
+
+| Table | Provenance |
+|-------|-----------|
+| `fts_nodes` | `kb_path`, `node_token`, `obj_token`, `updated_at` |
+| `fts_chunks` | `chunk_id`, `source_id`, `source_title`, `source_path`, `kb_path`, `chunk_index`, `created_at` |
+| `fts_memories` | `memory_id`, `kb_path`, `archived_at` |
+
+### Data flow
+
+- `plan-wiki` writes `knowledge_tree.json` → `search_kb.py` auto-rebuilds `fts_nodes` on next query.
+- `archive` writes typed records to `memories` + mirrors to `fts_memories`, then calls
+  `regen_node_summary()` to regenerate `knowledge_tree.json` node summary (no raw append).
+- `build_index.py --index-docs` chunks docs from `docs_dir` and inserts into `fts_chunks`.
+- `tools/seed_demo.py` creates a `demo` workspace with sample tree, doc chunks, and memories.
+
+### Ranking
+
+BM25 via SQLite's built-in `bm25(fts_nodes)` function. Scores are negative floats;
+lower (more negative) = better match. No external model calls for ranking.
+
+### Disabled extension points
+
+```python
+# lib/retrieval.py — intentionally False; do NOT enable without explicit user request
+_EMBED_ENABLED   = False   # sentence-transformer embedding for semantic reranking
+_RERANK_ENABLED  = False   # cross-encoder reranking pass over FTS5 results
+```
+
+Do not add embedding APIs (OpenAI embeddings, Cohere, sentence-transformers, etc.).
+Do not add reranker APIs. BM25 + Claude's own reading is sufficient at personal-KB scale.
 
 ---
 
 ## Sync Strategy
 
-- **Direction:** local → Feishu only (one-way, append-only).
-- **Idempotency:** NOT idempotent. Running `sync-wiki` twice creates duplicate nodes.
-  Always confirm with the user before syncing.
-- **Rate limiting:** `sync_to_feishu.py` sleeps 0.3 s between API calls.
-- **node_token / obj_token:** Written back to the workspace `knowledge_tree.json` after each
-  node is created. These tokens identify the live Feishu pages.
+### Direction and idempotency
+
+- **Direction:** local → Feishu only (one-way).
+- **Idempotent:** `sync_to_feishu.py` is now idempotent. Running it twice is safe.
+  The mapping file `feishu_map.json` tracks what has already been synced.
+- **Rate limiting:** 0.35 s sleep between API calls; up to 3 retries with exponential back-off.
+- **node_token / obj_token:** Written back to `knowledge_tree.json` and `feishu_map.json`
+  after each node is created. These tokens identify the live Feishu pages.
+
+### Mapping file (`workspaces/<kb_id>/feishu_map.json`)
+
+Tracks local-node path → `(node_token, obj_token, content_hash)` for every synced node.
+Gitignored (contains runtime Feishu identifiers, not source data).
+
+```jsonc
+{
+  "version": 1,
+  "space_id": "...",
+  "kb_id": "default",
+  "updated_at": "...",
+  "nodes": {
+    "LLM知识库 > MoE架构": {
+      "node_token": "abc...",
+      "obj_token": "xyz...",
+      "title": "MoE架构",
+      "synced_at": "...",
+      "content_hash": "sha256..."   // SHA-256 of rendered body content
+    }
+  },
+  "interviews": { ... }
+}
+```
+
+### Sync phases
+
+| Phase | Flag | Description |
+|-------|------|-------------|
+| Dry-run (default) | _(none)_ | Compute diff, print create/update/skip plan, no writes |
+| Apply | `--apply` | Execute diff, create/update nodes, save map after each success |
+| Recover | `--recover` | BFS-scan remote space, match by title path, populate map |
+| Interviews | `--interviews` | Also sync `interviews/*.json` under a `面试记录` container node |
+
+### Diff rules per node
+
+1. Path in map **and** `content_hash` unchanged → **skip**
+2. Path in map **and** `content_hash` changed → **update_content** (overwrite doc body only)
+3. Path not in map but `node_token` present in tree → **update_content** (recovery from old sync)
+4. Path not in map, no token → **create** (new node + write content)
+
+### Content rendering (no model API)
+
+After creating a node, its Feishu document body is written with:
+- Node `summary` (from `knowledge_tree.json`)
+- Typed memories from `kb_index.db` (`memories` table), formatted with type labels
+
+Content is plain text paragraphs written via `feishu.replace_doc_content()`.
+No model API calls are made during rendering.
 
 ---
 
@@ -200,7 +338,7 @@ Do not add embedding-based retrieval.
 | plan-wiki | User explicitly asks to plan/build a knowledge base | `knowledge_tree.json` (overwrite) | Yes — preview outline first | `plan_structure.py` |
 | sync-wiki | User says "sync to Feishu" (manual only, `disable-model-invocation: true`) | Feishu wiki nodes + tree tokens | Yes — show node count + risk warning | `sync_to_feishu.py` |
 | ask-kb | AI/ML/LLM technical question in ClawKnow context | None (read-only) | No | `search_kb.py` |
-| archive | User explicitly says "归档" / "save to KB" | `knowledge_tree.json` (append summary) | Yes — preview archiving plan | `archive_to_kb.py` |
+| archive | User explicitly says "归档" / "save to KB" | `kb_index.db/memories` (typed records); `knowledge_tree.json` (summary regenerated) | Yes — typed preview with type + confidence | `archive_to_kb.py` |
 | interview | User mentions interview / 面试 / 八股 context | `interviews/*.json`; Feishu (on sync) | Save: yes; Sync: yes | `manage_interview.py` |
 
 SKILL.md files are written in Chinese. All scripts and code comments are in English.
@@ -305,17 +443,21 @@ User input
 
 ## Known Limitations
 
-1. **Search quality:** Substring matching only. No stemming, no synonym expansion, weak CJK
-   support. Fine for a personal KB; would need FTS5 upgrade for larger corpora.
-2. **Sync is not idempotent:** Running sync-wiki twice creates duplicate Feishu nodes.
-   Always confirm with the user.
+1. **Search quality:** FTS5 BM25 with `unicode61` tokenizer. No stemming or synonym expansion.
+   CJK character-level tokenization is adequate for personal KBs; for corpora with 1000+ nodes
+   consider SQLite FTS5 with a jieba tokenizer plugin (optional future work).
+2. **Sync title rename not supported:** If a node's title changes after the initial sync,
+   `sync-wiki` does not rename the existing Feishu page (only content is updated).
+   Rename manually in Feishu and update `feishu_map.json` if needed.
 3. **plan_structure.py requires `ANTHROPIC_API_KEY`:** The only model API call in this repo.
    All other skills work without it.
 4. **No Feishu content read-back:** `lib/feishu.py` has `get_raw_content()` but no skill
    wires it into the local tree. Local JSON is the authoritative source.
-5. **No incremental sync:** Full tree sync every time; no diff against existing `node_token`s.
-6. **feishu_space_id override is runtime-only:** The override is applied by mutating
+5. **feishu_space_id override is runtime-only:** The override is applied by mutating
    `config.FEISHU_WIKI_SPACE_ID` in the script process. It does not persist across runs.
+6. **`replace_doc_content` uses `DeleteChildren`:** If the lark-oapi SDK version does not
+   expose `DeleteChildren`, the delete step is silently skipped and content is appended instead.
+   Upgrade the SDK to get true replace behavior.
 
 ---
 
@@ -323,9 +465,11 @@ User input
 
 Implement only when the user requests them.
 
-1. **FTS5 index** — migrate `knowledge_tree.json` to SQLite with FTS5 for better CJK search.
-2. **Incremental sync** — skip nodes whose `node_token` already exists in the local tree.
-3. **Interview summary page** — generate per-company Markdown and append via `append_text`.
-4. **skill-creator eval** — benchmark each skill's description to improve auto-trigger quality.
-5. **`ws` CLI helper** — a thin `tools/ws.py` that wraps `workspace.init_workspace()` for
+1. **FTS5 index** — ✅ implemented in `lib/retrieval.py`; `kb_index.db` per workspace.
+2. **Idempotent sync** — ✅ implemented; `feishu_map.json` + dry-run/apply/recover modes.
+3. **Content rendering** — ✅ summaries + typed memories written to Feishu doc body on sync.
+4. **Interview sync** — ✅ `--interviews` flag syncs JSON records under a `面试记录` node.
+5. **skill-creator eval** — benchmark each skill's description to improve auto-trigger quality.
+6. **`ws` CLI helper** — a thin `tools/ws.py` that wraps `workspace.init_workspace()` for
    creating new workspaces from the command line.
+7. **Rename sync** — detect title changes and call Feishu node rename API.

@@ -86,7 +86,7 @@ ClawKnow 里的"skill"是 Claude Code 的编排单元，不是独立程序：
 | plan-wiki | 分析文档 → 生成知识树结构 | 写（覆盖 knowledge_tree.json）|
 | sync-wiki | 本地知识树 → 飞书页面 | 写（飞书 + 更新 tokens）|
 | ask-kb | 检索知识库 + 回答 AI/ML 问题 | **只读** |
-| archive | 归档对话要点到指定知识树节点 | 写（追加 summary）|
+| archive | 归档对话要点 → 类型化记忆记录 → 重新生成节点摘要 | 写（kb_index.db/memories + knowledge_tree.json summary）|
 | interview | 记录面试、讨论答案、关联知识库 | 写（interviews/*.json）|
 
 **关键规则**：
@@ -137,7 +137,8 @@ ClawKnow 里的"skill"是 Claude Code 的编排单元，不是独立程序：
 |------|------|
 | `lib/config.py` | 从 `.env` 读取飞书/Anthropic 配置 |
 | `lib/feishu.py` | 封装飞书 Wiki V2 + Docx V1 API |
-| `lib/workspace.py` | **新增**：workspace 路径解析、`kb.yaml` 读写、workspace 初始化 |
+| `lib/workspace.py` | workspace 路径解析、`kb.yaml` 读写、workspace 初始化 |
+| `lib/retrieval.py` | **新增**：FTS5 两阶段检索 + 类型化记忆读写（见下节）|
 
 ### 各 skill 脚本
 
@@ -151,19 +152,316 @@ ClawKnow 里的"skill"是 Claude Code 的编排单元，不是独立程序：
 
 所有脚本默认 `--kb default`，旧用法完全兼容。
 
-### 目录结构（v1）
+---
+
+## 检索层（FTS5 两阶段检索）
+
+### 为什么用 FTS5，而不是 Embedding
+
+旧版 `search_kb.py` 使用子串匹配：对每个节点的 `title` 和 `summary` 做 `.lower() in` 判断，
+中文分词效果差（找"注意力"却搜不到"自注意力"），无法排序，只能靠简单加权。
+
+新版改用 **SQLite FTS5**（Python 标准库 `sqlite3`，不需要额外依赖）：
+
+- `unicode61` tokenizer：把每个 CJK 字符视为独立 token，中文检索质量显著提升
+- **BM25 排序**（SQLite 内置 `bm25()` 函数）：基于词频 + 逆文档频率打分，结果按相关性排序
+- 零外部依赖：不需要 Embedding API、不需要模型服务，纯本地 SQLite
+
+**为什么不用 Embedding？**
+
+| 方案 | 优点 | 缺点 | 为何不选 |
+|------|------|------|---------|
+| FTS5 BM25 | 零依赖、离线、快 | 词法匹配，不理解语义 | ✅ 已实现 |
+| Sentence-Transformer（本地） | 语义相似度 | 需要下载模型（几百MB）、有 GPU 更好 | 个人KB规模不需要 |
+| OpenAI Embedding API | 语义质量高 | 付费、联网、数据离开本地 | 违反硬约束（不引入新付费API）|
+
+对于个人知识库（几十到几百个节点），BM25 + Claude 自身的理解已经足够好。
+
+### 两阶段检索流程
+
+```
+用户提问
+   │
+   ▼
+Stage 1: fts_nodes MATCH query
+   │     BM25 排序，取 Top-K 节点（title + summary 字段）
+   │
+   ▼
+Stage 2: 每个匹配节点 → 获取相关证据
+   ├── fts_chunks MATCH query（过滤：kb_path 包含节点路径）
+   └── fts_memories MATCH query（过滤：kb_path 包含节点路径）
+         ↓
+   + Global pass（不过滤路径，捕获未关联节点的 chunks/memories）
+         ↓
+   返回结构化结果：📚 节点 / 📄 文档片段 / 🧠 归档记忆 / ⚠️ 知识空白提示
+```
+
+### 数据模型（`workspaces/<kb_id>/kb_index.db`）
+
+```
+fts_nodes        — KB 节点索引
+  title          (indexed)    节点标题
+  summary        (indexed)    节点摘要
+  kb_path        (unindexed)  "大方向 > 子类 > 知识点"
+  node_token     (unindexed)  飞书 node_token（已同步则有值）
+  updated_at     (unindexed)  最近索引时间
+
+fts_chunks       — 文档片段索引
+  content        (indexed)    切分后的段落文本
+  chunk_id       (unindexed)  SHA256(source_id + chunk_index)
+  source_id      (unindexed)  SHA256(file_path)
+  source_title   (unindexed)  文件名（美化后）
+  source_path    (unindexed)  文件绝对路径
+  kb_path        (unindexed)  关联的 KB 节点路径（可为空）
+  chunk_index    (unindexed)  在源文档中的位置（0-based）
+  created_at     (unindexed)  索引时间
+
+fts_memories     — 归档记忆索引
+  content        (indexed)    归档的对话摘要文本
+  memory_id      (unindexed)  SHA256(kb_path + archived_at + content[:64])
+  kb_path        (unindexed)  目标 KB 节点路径
+  archived_at    (unindexed)  归档时间（ISO-8601）
+
+sources          — 文档元数据（普通表，用于变更检测）
+  source_id, file_path, title, content_hash, chunk_count, indexed_at
+
+index_state      — 索引状态（普通表）
+  key='tree_hash'  → knowledge_tree.json 的 SHA256，用于自动增量重建判断
+```
+
+### 自动重建逻辑
+
+`search_kb.py` 每次运行时检查 `knowledge_tree.json` 的 SHA256 是否与 `index_state.tree_hash` 匹配：
+- 匹配 → 跳过，直接搜索
+- 不匹配（树有更新）→ 自动重建 `fts_nodes`，打印提示到 stderr
+
+文档片段（`fts_chunks`）需要手动调用 `build_index.py --index-docs` 更新，不自动重建（避免每次搜索都重新处理所有文档）。
+
+### 归档时同步更新索引
+
+`archive_to_kb.py` 在写入类型化记忆后：
+1. 把记忆写入 `memories` 结构化表（类型、置信度、来源引用）
+2. 同步镜像到 `fts_memories`（保持搜索兼容性）
+3. 调用 `regen_node_summary()` 重新生成 `knowledge_tree.json` 中节点的 `summary`（非追加）
+4. 重建 `fts_nodes`（反映新生成的 summary）
+
+这些步骤是 best-effort（失败不中断归档），日志打印到 stderr。
+
+### 演示数据
+
+运行 `python tools/seed_demo.py` 创建一个独立的 `demo` workspace，包含：
+- 10 个 LLM 知识节点（Transformer、注意力、MoE、Flash Attention、RLHF、GRPO 等）
+- `docs/demo_llm_notes.md` 的文档片段
+- 2 条示例归档记忆
+
+测试命令：`python .claude/skills/ask-kb/scripts/search_kb.py --kb demo MoE 路由`
+
+---
+
+## 类型化记忆（Typed Memory）——归档机制重设计
+
+### 为什么"追加 summary"是糟糕的工程实践
+
+旧版 `archive` 的工作方式：把新内容以 `---\n[日期] 补充：\n- 要点` 格式拼接到节点的
+`summary` 字段后面。看似简单，实则有几个根本性问题：
+
+1. **摘要变成垃圾桶**：归档 5–10 次后，`summary` 变成一堆 `---` 分隔的文本块，
+   没有结构，搜索时 BM25 评分被稀释，阅读时无法分辨什么是定义、什么是疑问、什么是来源。
+
+2. **无法区分知识质量**：一条已经验证的事实（`"Mixtral 激活 2/8 个专家"`）
+   和一条还没确认的猜测（`"Expert Capacity 设过小可能导致不稳定？"`）
+   混在一起，Claude 下次检索时无从判断可信度。
+
+3. **无法按来源追溯**：不知道某条知识来自哪篇论文、哪次对话，无法验证或更新。
+
+4. **摘要不可重建**：如果 summary 写乱了，只能手动清理，没有机制从原始数据重新生成。
+
+### 类型化记忆的工作方式
+
+新版 `archive` 把每条知识要点存为独立的**记忆记录**（memory record），写入
+`kb_index.db` 的 `memories` 结构化表：
+
+```
+memories 表字段：
+  memory_id   — SHA-256 稳定 ID，幂等去重
+  type        — concept / fact / insight / source_note / question / decision
+  content     — 知识内容（一到两句话）
+  kb_path     — 归属节点路径
+  source_refs — 来源引用列表（JSON 数组）
+  author      — claude 或 user
+  confidence  — high / medium / low
+  created_at  — 写入时间
+```
+
+归档后，`regen_node_summary()` 从该节点的所有记忆生成结构化 `summary`，
+按类型顺序排列，**完全替换**旧摘要：
+
+```
+[概念] MoE 通过 Gate 网络将 FFN 替换为稀疏激活的多个专家子网络
+[事实] Mixtral 8×7B 每次激活 2/8 专家，推理 FLOPs 与 13B Dense 模型相当
+[洞察] Expert Capacity 设置过小会导致 token dropping，需要实验调整
+[来源] Paper: Switch Transformers (Fedus et al., 2021)
+[待解答] Load Balancing Loss 系数 α 过大对训练稳定性的具体影响？
+```
+
+这个过程**不调用任何外部 API**，完全在本地 SQLite 里完成，确定性输出。
+
+### 归档流程对比（Before vs After）
+
+**Before（旧：追加模式）**
+
+```
+# 第一次归档（2026-03-18）
+节点 summary：
+  "MoE 将 FFN 替换为稀疏专家，Top-K 路由。"
+
+# 第二次归档（2026-03-19）
+节点 summary（追加后）：
+  "MoE 将 FFN 替换为稀疏专家，Top-K 路由。
+  ---
+  [2026-03-19] 补充：
+  - Expert Capacity 是防止专家过载的上限，超出则 token dropping
+  - DeepSeekMoE 引入 Fine-grained expert segmentation
+  ---
+  [2026-03-20] 补充：
+  - Load Balancing Loss 系数 α 建议 0.01，太大会干扰主任务训练"
+
+# 问题：5 次归档后，summary 是一堵墙，无法判断哪条可信，哪条是疑问
+```
+
+**After（新：类型化记忆）**
+
+```
+# memories 表（结构化，每条独立）：
+memory_id: abc...  type: concept     content: "MoE 将 FFN 替换为稀疏专家，Top-K 路由"           confidence: high
+memory_id: def...  type: fact        content: "Expert Capacity 是防止专家过载上限，超出则 token dropping"  confidence: high  source_refs: ["DeepSeekMoE论文"]
+memory_id: ghi...  type: fact        content: "DeepSeekMoE 引入 Fine-grained expert segmentation"       confidence: high  source_refs: ["DeepSeekMoE论文"]
+memory_id: jkl...  type: insight     content: "Load Balancing Loss 系数 α 建议 0.01，太大会干扰训练"       confidence: medium
+memory_id: mno...  type: question    content: "α 过大对训练稳定性的具体影响？"                             confidence: low
+
+# 自动生成的 summary（可随时从 memories 重建）：
+  [概念] MoE 将 FFN 替换为稀疏专家，Top-K 路由
+  [事实] Expert Capacity 是防止专家过载上限，超出则 token dropping
+  [事实] DeepSeekMoE 引入 Fine-grained expert segmentation
+  [洞察] Load Balancing Loss 系数 α 建议 0.01，太大会干扰训练
+  [待解答] α 过大对训练稳定性的具体影响？
+```
+
+优势：
+- **结构清晰**：FTS5 搜索能看到置信度和类型标签
+- **可重建**：`--regen-only` 随时从 memories 重新生成干净的 summary
+- **可演进**：可按类型过滤（只看 `question`、只看 `concept`）
+- **来源可溯**：`source_refs` 字段明确记录出处
+
+### 六种记忆类型的使用指南
+
+| 类型 | 中文标签 | 用途 | 典型示例 |
+|------|---------|------|---------|
+| `concept` | [概念] | 核心定义或原理 | "MoE 通过 Gate 网络选择 Top-K 专家" |
+| `fact` | [事实] | 可验证的具体数据或行为 | "Mixtral 8×7B 推理 FLOPs 与 13B 相当" |
+| `insight` | [洞察] | 对比、权衡或经验结论 | "Expert Capacity 设置需要实验调整" |
+| `source_note` | [来源] | 论文/文章/项目引用 | "Paper: Switch Transformers, Fedus 2021" |
+| `question` | [待解答] | 尚未验证的问题 | "α 过大的稳定性影响？" |
+| `decision` | [决策] | 项目或实践决定 | "本项目暂不启用 Expert Capacity" |
+
+**置信度**的含义：
+- `high`：已经在可靠来源中验证
+- `medium`：有合理依据，但未完全验证
+- `low`：假设或猜测，需要后续确认
+
+---
+
+### 目录结构（v1，含检索层）
 
 ```
 workspaces/
 ├── default/                  # 默认知识库（适合大多数人只用一个知识库的场景）
 │   ├── kb.yaml               # 配置文件，进 git
 │   ├── knowledge_tree.json   # 知识树，gitignored
+│   ├── kb_index.db           # FTS5 索引，gitignored（自动生成）
 │   └── interviews/           # 面试记录，gitignored
 └── work-notes/               # 示例：第二个知识库
     ├── kb.yaml
     ├── knowledge_tree.json
+    ├── kb_index.db
     └── interviews/
 ```
+
+---
+
+## 幂等同步（Idempotent Sync）
+
+### 为什么 Create-Only 同步是危险的
+
+旧版 `sync-wiki` 的行为：
+- 每次运行都**无条件**在飞书创建所有节点
+- 跑两次 = 飞书里出现两份完全相同的知识库
+- 如果中途失败，已创建的节点无法回滚，只能手动到飞书删除
+
+这使得用户必须非常小心地只运行一次，并且无法安全重试失败的同步。
+
+### 新版幂等同步的设计
+
+核心机制：**`feishu_map.json`** 映射文件（每个 workspace 一份，gitignored）。
+
+```json
+{
+  "nodes": {
+    "LLM知识库 > MoE架构": {
+      "node_token": "abc...",
+      "obj_token": "xyz...",
+      "content_hash": "sha256..."
+    }
+  }
+}
+```
+
+每次同步前，脚本计算本地知识树与 map 的**差异（diff）**：
+
+| 状态 | 操作 |
+|------|------|
+| 路径在 map，`content_hash` 未变 | **skip**（不调任何 API） |
+| 路径在 map，`content_hash` 变了 | **update_content**（只更新文档正文） |
+| 路径不在 map，但树节点有 token | **update_content**（从旧格式恢复）|
+| 路径不在 map，无 token | **create**（新建节点 + 写内容）|
+
+每次成功的 create/update 后**立即保存 map**，所以中途失败可以安全重跑。
+
+### 使用流程
+
+**首次同步（全新知识库）：**
+
+```bash
+# 1. 先看 dry-run（默认行为，不写任何东西）
+python .claude/skills/sync-wiki/scripts/sync_to_feishu.py --kb default
+
+# 2. 确认预览后执行
+python .claude/skills/sync-wiki/scripts/sync_to_feishu.py --kb default --apply
+```
+
+**飞书已有节点，但 feishu_map.json 为空（首次使用幂等版）：**
+
+```bash
+# 先恢复映射（BFS 扫描飞书，按标题路径匹配）
+python .claude/skills/sync-wiki/scripts/sync_to_feishu.py --recover --apply
+
+# 然后再做内容更新
+python .claude/skills/sync-wiki/scripts/sync_to_feishu.py --apply
+```
+
+**同步面试记录：**
+
+```bash
+python .claude/skills/sync-wiki/scripts/sync_to_feishu.py --apply --interviews
+```
+
+### 页面内容渲染
+
+同步时，每个新建/更新的节点会自动写入正文内容，包括：
+- 节点的 `summary` 字段（`knowledge_tree.json` 中）
+- 该节点下所有类型化记忆（从 `kb_index.db` 读取，格式化为 `[概念]`、`[事实]` 等标签）
+
+**不调用任何外部 API**，全部在本地完成。
 
 ---
 
@@ -220,14 +518,17 @@ Claude 同步更新 CLAUDE.md 和 CLAUDE_CN.md
 
 ## 目前的限制
 
-1. **检索质量有限**：子串匹配，中文分词不好，复杂查询可能漏节点。
-   如果节点超过几百个，考虑升级到 SQLite FTS5（不需要 Embedding）。
+1. **检索质量**：FTS5 BM25 + `unicode61` tokenizer，比原来的子串匹配好得多。
+   中文仍是字符级 tokenization（非 jieba 词级分词），极复杂的语义查询仍可能漏掉节点，
+   但对个人知识库规模（< 500 节点）已足够。
 
-2. **同步不幂等**：`sync-wiki` 跑两次 = 飞书里出现两份。**每次同步前必须确认。**
+2. **同步已幂等**：`sync-wiki` 现在可以安全重复运行。`feishu_map.json` 记录已同步节点，
+   第二次运行会 skip 所有未变更的节点。
 
 3. **只能写飞书，不能读回**：知识库的权威数据源是本地 JSON，不是飞书。
 
-4. **没有增量同步**：每次全量创建，不会跳过已有 `node_token` 的节点。
+4. **标题改名不自动同步**：如果本地节点标题修改后，`sync-wiki` 只更新文档正文内容，
+   不会重命名飞书页面标题。需要在飞书手动改标题，然后更新 `feishu_map.json`。
 
 5. **`plan_structure.py` 需要 `ANTHROPIC_API_KEY`**：项目里唯一需要 API key 的地方。
    其他所有功能不需要。
@@ -240,9 +541,12 @@ Claude 同步更新 CLAUDE.md 和 CLAUDE_CN.md
 
 | 优先级 | 功能 | 说明 |
 |--------|------|------|
-| 高 | FTS5 检索升级 | 用 SQLite FTS5 索引替代子串匹配，提升中文检索质量 |
-| 高 | 增量同步 | 同步前检查 node_token 是否已存在，跳过已创建节点 |
-| 中 | 面试总结页 | 把面试 JSON 生成 Markdown 摘要，写入飞书节点正文 |
+| ✅ 已完成 | FTS5 检索升级 | `lib/retrieval.py` + `kb_index.db` 两阶段检索，BM25 排序 |
+| ✅ 已完成 | 类型化记忆归档 | `memories` 表 + `write_memory` / `regen_node_summary`，替换 summary 追加模式 |
+| ✅ 已完成 | 幂等同步 | `feishu_map.json` + dry-run/apply/recover 模式，安全重试 |
+| ✅ 已完成 | 内容渲染 | 同步时自动写入摘要 + 类型化记忆到飞书文档正文 |
+| ✅ 已完成 | 面试同步 | `--interviews` 把面试 JSON 同步为 `面试记录` 下的飞书页面 |
 | 中 | skill-creator 评估 | 对每个 skill 跑 benchmark，改进触发描述质量 |
 | 低 | `ws` CLI 小工具 | `python tools/ws.py new <kb_id>` 一行命令创建新 workspace |
+| 低 | 标题改名同步 | 检测标题变更，调用飞书节点重命名 API |
 | 低 | 飞书内容读回 | 双向同步：把飞书页面内容同步回本地树的 summary 字段 |
