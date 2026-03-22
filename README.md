@@ -12,9 +12,13 @@ All features are triggered by natural language — just talk to Claude:
 |-------|--------------------------|--------------|
 | plan-wiki | Provide docs, ask to organize knowledge | Analyzes docs → generates a structured knowledge tree |
 | sync-wiki | Say "sync to Feishu" (manual `/sync-wiki`) | Creates wiki nodes in Feishu from the knowledge tree |
-| ask-kb | Ask any AI/LLM technical question | Searches KB first, supports web search fallback |
-| archive | Say "archive" / "save to KB" | Saves discussion highlights into the knowledge tree |
+| ask-kb | Ask any AI/LLM technical question | Searches KB + papers first, supports web search fallback |
+| archive | Say "archive" / "save to KB" | Saves typed memory records; regenerates node summary |
 | interview | Mention interviews, 面试, 八股 | Records interview Q&A, links to KB knowledge points |
+| ingest-paper | Provide arXiv/DOI/URL to import | Claude fills structured paper record; saves + FTS-indexes |
+| discuss-paper | Say "discuss this paper" / "paper list" | Multi-round discussion; accumulates user insights |
+| link-paper-to-kb | Say "link paper to KB" / "add edge" | Creates typed relation edges in the knowledge graph |
+| graph-review | Say "graph review" / "check KB health" | Reports stale/weak nodes and candidate link suggestions |
 
 ## Quick Start
 
@@ -144,26 +148,34 @@ ClawKnow/
 ├── lib/                                # Shared Python modules
 │   ├── config.py                       # Env var loader
 │   ├── feishu.py                       # Feishu API wrapper (lark-oapi)
-│   └── workspace.py                    # Workspace resolver (multi-KB)
+│   ├── workspace.py                    # Workspace resolver (multi-KB)
+│   └── retrieval.py                    # FTS5 retrieval + paper CRUD + edge management
 ├── workspaces/                         # One directory per knowledge base
 │   └── default/                        # Default workspace
 │       ├── kb.yaml                     # Workspace metadata (tracked)
 │       ├── knowledge_tree.json         # Local tree cache (gitignored)
-│       └── interviews/                 # Interview records (gitignored)
+│       ├── kb_index.db                 # FTS5 index + memories + edges (gitignored)
+│       ├── interviews/                 # Interview records (gitignored)
+│       ├── papers/                     # Ingested paper records (gitignored)
+│       └── graph/                      # Exported graph files (gitignored)
 ├── .claude/skills/                     # Claude Code skills
-│   ├── skill-creator/                  # Official skill lifecycle tool
 │   ├── plan-wiki/
 │   ├── sync-wiki/
 │   ├── ask-kb/
 │   ├── archive/
-│   └── interview/
+│   ├── interview/
+│   ├── ingest-paper/                   # Import academic papers
+│   ├── discuss-paper/                  # Multi-round paper discussion
+│   ├── link-paper-to-kb/               # Create relation edges
+│   └── graph-review/                   # Knowledge graph health review
 ├── tools/
-│   └── migrate_legacy.py               # v0 → v1 migration helper
+│   ├── export_graph.py                 # Export graph → JSONL + JSON
+│   ├── review_graph.py                 # Graph health review script
+│   └── migrate_legacy.py              # v0 → v1 migration helper
 ├── docs/                               # Your raw study documents
 ├── .env.example
 ├── pyproject.toml
-├── CLAUDE.md                           # Claude Code project instructions
-└── CLAUDE_CN.md                        # Chinese owner guide
+└── CLAUDE.md                           # Claude Code project instructions
 ```
 
 ## Knowledge Tree Example

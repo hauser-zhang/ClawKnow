@@ -6,17 +6,16 @@ dist/
 *.egg-info/
 .ruff_cache/
 
-# Legacy single-KB paths (v0)
-data/knowledge_tree.json
-data/interviews/*.json
-
-# Multi-workspace data (v1) — kb configs (kb.yaml) are tracked; data files are not
+# Multi-workspace data — kb configs (kb.yaml) are tracked; runtime data is not
 workspaces/*/knowledge_tree.json
 workspaces/*/interviews/*.json
 workspaces/*/kb_index.db
 workspaces/*/feishu_map.json
+workspaces/*/papers/*.json
+workspaces/*/graph/
 
 *-workspace/
 
-# Personal owner guide (not for repo)
+# Personal owner files — not for repo consumers
 CLAUDE_CN.md
+.claude/rules/
