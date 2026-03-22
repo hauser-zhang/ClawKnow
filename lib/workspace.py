@@ -92,6 +92,24 @@ def get_map_path(project_root: Path, kb_id: str) -> Path:
     return get_workspace_dir(project_root, kb_id) / "feishu_map.json"
 
 
+def get_papers_dir(project_root: Path, kb_id: str) -> Path:
+    """Return path to the papers directory for *kb_id*.
+
+    Each paper is stored as a JSON file: papers/<paper_id>.json.
+    This directory is gitignored (personal reading notes, not source code).
+    """
+    return get_workspace_dir(project_root, kb_id) / "papers"
+
+
+def get_graph_dir(project_root: Path, kb_id: str) -> Path:
+    """Return path to the graph export directory for *kb_id*.
+
+    Contains nodes.jsonl, edges.jsonl, and graph.json — all auto-generated,
+    gitignored, and safe to delete and regenerate.
+    """
+    return get_workspace_dir(project_root, kb_id) / "graph"
+
+
 def init_workspace(
     project_root: Path,
     kb_id: str,

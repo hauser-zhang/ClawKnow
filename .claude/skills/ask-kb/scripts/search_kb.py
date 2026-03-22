@@ -41,8 +41,9 @@ def _print_results(result: dict, kb_id: str) -> None:
     nodes = result["nodes"]
     chunks = result["chunks"]
     memories = result["memories"]
+    papers = result.get("papers", [])
 
-    if not nodes and not chunks and not memories:
+    if not nodes and not chunks and not memories and not papers:
         print(f"[kb={kb_id}] 未找到与 '{query}' 相关的内容。")
         print("建议：可联网搜索补充，或先运行 plan-wiki 建立知识库。")
         return
@@ -85,6 +86,22 @@ def _print_results(result: dict, kb_id: str) -> None:
             print(f"  内容: {preview}")
             print()
 
+    # Stage 3 — Paper matches (if any papers ingested)
+    if papers:
+        print(f"[PAPER] 相关论文 ({len(papers)} 篇):\n")
+        for p in papers:
+            year = p.get("year") or ""
+            authors = p.get("authors") or ""
+            status = p.get("status", "?")
+            pid = p.get("paper_id", "")
+            print(f"  [{status}] {p['title']} ({year})  id: {pid}")
+            if authors:
+                print(f"  作者: {authors}")
+            preview = (p.get("abstract_summary") or "")[:200].replace("\n", " ")
+            if preview:
+                print(f"  摘要: {preview}")
+            print()
+
     # Signal knowledge gaps
     if not result["has_kb_nodes"]:
         print(f"[GAP] 知识库中无节点与 '{query}' 匹配 — 建议联网搜索补充。")
@@ -122,6 +139,8 @@ def main() -> None:
     conn = retrieval.open_db(db_path)
     try:
         result = retrieval.two_stage_search(conn, query, top_nodes=args.top)
+        # Augment with paper search results (best-effort; no-op if fts_papers absent)
+        result["papers"] = retrieval.search_papers(conn, query, top_k=3)
     finally:
         conn.close()
 

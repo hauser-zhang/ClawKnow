@@ -95,6 +95,22 @@ _DDL_STATEMENTS = [
         archived_at UNINDEXED,
         tokenize='unicode61'
     )""",
+    # FTS5 paper index: academic papers ingested for reading and discussion.
+    # title + abstract_summary + method_summary are full-text indexed.
+    """CREATE VIRTUAL TABLE IF NOT EXISTS fts_papers USING fts5(
+        title,
+        abstract_summary,
+        method_summary,
+        paper_id  UNINDEXED,
+        year      UNINDEXED,
+        authors   UNINDEXED,
+        venue     UNINDEXED,
+        doi       UNINDEXED,
+        arxiv_id  UNINDEXED,
+        status    UNINDEXED,
+        added_at  UNINDEXED,
+        tokenize='unicode61'
+    )""",
     # Regular table: document source metadata for change-detection.
     """CREATE TABLE IF NOT EXISTS sources (
         source_id    TEXT PRIMARY KEY,
@@ -121,6 +137,21 @@ _DDL_STATEMENTS = [
         confidence  TEXT NOT NULL DEFAULT 'medium',
         created_at  TEXT NOT NULL,
         updated_at  TEXT
+    )""",
+    # Regular table: unified edge store for all relationship types.
+    # src/dst can be kb_node paths or paper_ids; edge_type encodes semantics.
+    # Valid edge_types: contains, related_to, depends_on, compares_with,
+    #                   derived_from, updated_by, cites
+    """CREATE TABLE IF NOT EXISTS edges (
+        edge_id    TEXT PRIMARY KEY,
+        src_id     TEXT NOT NULL,
+        src_type   TEXT NOT NULL DEFAULT 'kb_node',
+        dst_id     TEXT NOT NULL,
+        dst_type   TEXT NOT NULL DEFAULT 'kb_node',
+        edge_type  TEXT NOT NULL,
+        weight     REAL NOT NULL DEFAULT 1.0,
+        note       TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL
     )""",
 ]
 
@@ -692,3 +723,429 @@ def is_index_stale(conn: sqlite3.Connection, tree_path: Path) -> bool:
     current_hash = _sha256(tree_path.read_text(encoding="utf-8"))
     indexed_hash = get_tree_hash_in_index(conn)
     return current_hash != indexed_hash
+
+
+# ---------------------------------------------------------------------------
+# Paper indexing and retrieval
+# ---------------------------------------------------------------------------
+
+#: Valid values for a paper's ``status`` field.
+PAPER_STATUSES: frozenset[str] = frozenset({"reading", "read", "reviewed"})
+
+#: Valid edge types for the ``edges`` table.
+EDGE_TYPES: frozenset[str] = frozenset(
+    {"contains", "related_to", "depends_on", "compares_with", "derived_from", "updated_by", "cites"}
+)
+
+
+def index_paper(conn: sqlite3.Connection, paper: dict[str, Any]) -> str:
+    """Insert or replace a paper record into *fts_papers*.
+
+    *paper* must have at least ``paper_id`` and ``title``.
+    Other fields are optional and default to empty strings.
+
+    Returns *paper_id*.
+    """
+    paper_id = paper.get("paper_id", "")
+    if not paper_id:
+        raise ValueError("paper must have a non-empty 'paper_id'")
+    authors = paper.get("authors", [])
+    authors_str = ", ".join(authors) if isinstance(authors, list) else str(authors)
+    # Remove stale entry first (FTS5 DELETE + INSERT = UPDATE)
+    conn.execute("DELETE FROM fts_papers WHERE paper_id = ?", (paper_id,))
+    conn.execute(
+        "INSERT INTO fts_papers"
+        "(title, abstract_summary, method_summary, paper_id, year, authors,"
+        " venue, doi, arxiv_id, status, added_at)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            paper.get("title", ""),
+            paper.get("abstract_summary", ""),
+            paper.get("method_summary", ""),
+            paper_id,
+            str(paper.get("year", "")),
+            authors_str,
+            paper.get("venue", ""),
+            paper.get("doi", ""),
+            paper.get("arxiv_id", ""),
+            paper.get("status", "reading"),
+            paper.get("added_at", _now()),
+        ),
+    )
+    conn.commit()
+    return paper_id
+
+
+def search_papers(
+    conn: sqlite3.Connection,
+    query: str,
+    top_k: int = 5,
+    status_filter: str | None = None,
+) -> list[dict[str, Any]]:
+    """FTS5 BM25 search over paper title, abstract_summary, and method_summary.
+
+    If *status_filter* is set, only papers with that status are returned
+    (post-filter on the UNINDEXED ``status`` column).
+
+    Returns dicts with keys:
+        paper_id, title, abstract_summary, method_summary, year, authors,
+        venue, doi, arxiv_id, status, added_at, score
+    """
+    if not query.strip():
+        return []
+    fts_q = _fts_query(query)
+    if not fts_q:
+        return []
+    try:
+        fetch_limit = top_k * 4 if status_filter else top_k
+        rows = conn.execute(
+            "SELECT paper_id, title, abstract_summary, method_summary, year, authors,"
+            " venue, doi, arxiv_id, status, added_at, bm25(fts_papers) AS score"
+            " FROM fts_papers"
+            " WHERE fts_papers MATCH ?"
+            " ORDER BY score"
+            " LIMIT ?",
+            (fts_q, fetch_limit),
+        ).fetchall()
+        results = [dict(r) for r in rows]
+    except sqlite3.OperationalError:
+        return []
+    if status_filter:
+        results = [r for r in results if r.get("status") == status_filter]
+    return results[:top_k]
+
+
+def list_papers(
+    conn: sqlite3.Connection,
+    status_filter: str | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """Return all indexed papers, optionally filtered by status.
+
+    Results ordered by added_at descending (most recent first).
+    Each dict has the same keys as ``search_papers`` results (without score).
+    """
+    if status_filter:
+        rows = conn.execute(
+            "SELECT paper_id, title, abstract_summary, method_summary, year, authors,"
+            " venue, doi, arxiv_id, status, added_at"
+            " FROM fts_papers WHERE status = ?"
+            " ORDER BY added_at DESC LIMIT ?",
+            (status_filter, limit),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT paper_id, title, abstract_summary, method_summary, year, authors,"
+            " venue, doi, arxiv_id, status, added_at"
+            " FROM fts_papers"
+            " ORDER BY added_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Edge management (unified: kb_node↔kb_node, paper↔kb_node, paper↔paper)
+# ---------------------------------------------------------------------------
+
+
+def write_edge(
+    conn: sqlite3.Connection,
+    src_id: str,
+    dst_id: str,
+    edge_type: str,
+    src_type: str = "kb_node",
+    dst_type: str = "kb_node",
+    weight: float = 1.0,
+    note: str = "",
+) -> str:
+    """Insert an edge record into the ``edges`` table.
+
+    Uses INSERT OR IGNORE so calling with identical (src_id, dst_id, edge_type)
+    twice is safe — the second call is silently skipped.
+
+    *edge_type* should be one of :data:`EDGE_TYPES`; unrecognised values are
+    stored as-is.
+
+    Returns the ``edge_id`` (SHA-256 derived stable identifier).
+    """
+    now = _now()
+    edge_id = _sha256(f"{src_type}:{src_id}:{edge_type}:{dst_type}:{dst_id}")
+    conn.execute(
+        "INSERT OR IGNORE INTO edges"
+        "(edge_id, src_id, src_type, dst_id, dst_type, edge_type, weight, note, created_at)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (edge_id, src_id, src_type, dst_id, dst_type, edge_type, weight, note, now),
+    )
+    conn.commit()
+    return edge_id
+
+
+def list_edges(
+    conn: sqlite3.Connection,
+    node_id: str | None = None,
+    edge_type: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return edges, optionally filtered by node_id (src or dst) and/or edge_type.
+
+    Each dict has: edge_id, src_id, src_type, dst_id, dst_type, edge_type,
+                   weight, note, created_at.
+    """
+    conditions: list[str] = []
+    params: list[Any] = []
+    if node_id is not None:
+        conditions.append("(src_id = ? OR dst_id = ?)")
+        params.extend([node_id, node_id])
+    if edge_type is not None:
+        conditions.append("edge_type = ?")
+        params.append(edge_type)
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    rows = conn.execute(
+        f"SELECT edge_id, src_id, src_type, dst_id, dst_type, edge_type, weight, note, created_at"
+        f" FROM edges {where} ORDER BY created_at",
+        params,
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def delete_edge(conn: sqlite3.Connection, edge_id: str) -> bool:
+    """Delete an edge by its edge_id. Returns True if a row was deleted."""
+    cur = conn.execute("DELETE FROM edges WHERE edge_id = ?", (edge_id,))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+# ---------------------------------------------------------------------------
+# Graph export helpers
+# ---------------------------------------------------------------------------
+
+
+def export_graph(
+    conn: sqlite3.Connection,
+    tree: dict[str, Any],
+) -> dict[str, Any]:
+    """Build an in-memory graph dict from the knowledge tree and edge table.
+
+    Returns:
+        {
+            "nodes": [{"id": kb_path, "type": "kb_node"|"paper", "label": title,
+                        "summary": ..., "node_token": ..., "obj_token": ...}],
+            "edges": [{"edge_id": ..., "src": ..., "src_type": ..., "dst": ...,
+                        "dst_type": ..., "type": ..., "weight": ..., "note": ...}]
+        }
+
+    Nodes are generated from:
+      - The knowledge tree (type="kb_node"), with a synthetic ``contains`` edge
+        from parent to each child.
+      - Papers indexed in fts_papers (type="paper").
+
+    Edges are generated from the ``edges`` table.
+    """
+    nodes: list[dict[str, Any]] = []
+    edges: list[dict[str, Any]] = []
+    seen_edges: set[str] = set()
+
+    # Walk tree → kb_node entries + contains edges
+    def _walk(node: dict[str, Any], parent_path: str | None = None, path: list[str] | None = None) -> None:
+        p = (path or []) + [node.get("title", "")]
+        kb_path = " > ".join(p)
+        nodes.append({
+            "id": kb_path,
+            "type": "kb_node",
+            "label": node.get("title", ""),
+            "summary": node.get("summary", ""),
+            "node_token": node.get("node_token", ""),
+            "obj_token": node.get("obj_token", ""),
+        })
+        if parent_path is not None:
+            eid = _sha256(f"contains:{parent_path}:{kb_path}")
+            if eid not in seen_edges:
+                seen_edges.add(eid)
+                edges.append({
+                    "edge_id": eid,
+                    "src": parent_path,
+                    "src_type": "kb_node",
+                    "dst": kb_path,
+                    "dst_type": "kb_node",
+                    "type": "contains",
+                    "weight": 1.0,
+                    "note": "tree structure",
+                })
+        for child in node.get("children", []):
+            _walk(child, kb_path, p)
+
+    _walk(tree)
+
+    # Paper entries
+    try:
+        paper_rows = conn.execute(
+            "SELECT paper_id, title, abstract_summary, year, authors, status FROM fts_papers"
+        ).fetchall()
+        for row in paper_rows:
+            nodes.append({
+                "id": row["paper_id"],
+                "type": "paper",
+                "label": row["title"],
+                "summary": row["abstract_summary"],
+                "year": row["year"],
+                "authors": row["authors"],
+                "status": row["status"],
+            })
+    except sqlite3.OperationalError:
+        pass  # table may not exist yet
+
+    # Edges from the edges table
+    try:
+        edge_rows = conn.execute(
+            "SELECT edge_id, src_id, src_type, dst_id, dst_type, edge_type, weight, note"
+            " FROM edges ORDER BY created_at"
+        ).fetchall()
+        for row in edge_rows:
+            eid = row["edge_id"]
+            if eid not in seen_edges:
+                seen_edges.add(eid)
+                edges.append({
+                    "edge_id": eid,
+                    "src": row["src_id"],
+                    "src_type": row["src_type"],
+                    "dst": row["dst_id"],
+                    "dst_type": row["dst_type"],
+                    "type": row["edge_type"],
+                    "weight": row["weight"],
+                    "note": row["note"],
+                })
+    except sqlite3.OperationalError:
+        pass
+
+    return {"nodes": nodes, "edges": edges}
+
+
+# ---------------------------------------------------------------------------
+# Graph review helpers
+# ---------------------------------------------------------------------------
+
+
+def review_graph(
+    conn: sqlite3.Connection,
+    tree: dict[str, Any],
+    stale_days: int = 30,
+    recent_days: int = 7,
+) -> dict[str, Any]:
+    """Analyse the graph and return a review report dict.
+
+    Returns:
+        {
+            "recently_added": [{"kb_path": ..., "created_at": ..., "content": ...}],
+            "stale_nodes":    [{"kb_path": ..., "last_activity": ...}],
+            "weak_nodes":     [{"kb_path": ..., "title": ...}],
+            "candidate_links": [{"a": ..., "b": ..., "reason": ...}]
+        }
+
+    - **recently_added**: memories created within *recent_days* (from ``memories`` table).
+    - **stale_nodes**: KB nodes where no memory has been written in *stale_days* days.
+    - **weak_nodes**: KB leaf nodes with no typed memories, no doc chunks, and no paper edges.
+    - **candidate_links**: KB node pairs that share common title words (simple heuristic).
+    """
+    from datetime import timedelta
+
+    now_dt = datetime.now(timezone.utc)
+    recent_cutoff = (now_dt - timedelta(days=recent_days)).isoformat()
+    stale_cutoff = (now_dt - timedelta(days=stale_days)).isoformat()
+
+    # Recently added memories
+    recently_added: list[dict[str, Any]] = []
+    try:
+        rows = conn.execute(
+            "SELECT kb_path, content, created_at FROM memories"
+            " WHERE created_at >= ? ORDER BY created_at DESC LIMIT 30",
+            (recent_cutoff,),
+        ).fetchall()
+        recently_added = [dict(r) for r in rows]
+    except sqlite3.OperationalError:
+        pass
+
+    # Build node list from tree
+    all_nodes = _walk_tree(tree)
+
+    # Last activity per kb_path (most recent memory created_at)
+    activity_map: dict[str, str] = {}
+    try:
+        rows = conn.execute(
+            "SELECT kb_path, MAX(created_at) AS last_at FROM memories GROUP BY kb_path"
+        ).fetchall()
+        for r in rows:
+            activity_map[r["kb_path"]] = r["last_at"]
+    except sqlite3.OperationalError:
+        pass
+
+    # Stale nodes: has some memories but none recently
+    stale_nodes: list[dict[str, Any]] = []
+    for entry in all_nodes:
+        path_str = " > ".join(entry["path"])
+        last = activity_map.get(path_str)
+        if last and last < stale_cutoff:
+            stale_nodes.append({"kb_path": path_str, "last_activity": last})
+
+    # Weak nodes: leaf nodes (no children) with no memories, no chunks, no paper edges
+    node_with_memories = set(activity_map.keys())
+    try:
+        chunk_paths = {
+            r[0]
+            for r in conn.execute("SELECT DISTINCT kb_path FROM fts_chunks").fetchall()
+            if r[0]
+        }
+    except sqlite3.OperationalError:
+        chunk_paths = set()
+    try:
+        paper_linked = set()
+        for r in conn.execute(
+            "SELECT dst_id FROM edges WHERE dst_type = 'kb_node'"
+        ).fetchall():
+            paper_linked.add(r[0])
+        for r in conn.execute(
+            "SELECT src_id FROM edges WHERE src_type = 'kb_node'"
+        ).fetchall():
+            paper_linked.add(r[0])
+    except sqlite3.OperationalError:
+        paper_linked = set()
+
+    weak_nodes: list[dict[str, Any]] = []
+    for entry in all_nodes:
+        node = entry["node"]
+        path_str = " > ".join(entry["path"])
+        is_leaf = not node.get("children")
+        if is_leaf:
+            has_support = (
+                path_str in node_with_memories
+                or path_str in chunk_paths
+                or path_str in paper_linked
+            )
+            if not has_support:
+                weak_nodes.append({"kb_path": path_str, "title": node.get("title", "")})
+
+    # Candidate links: pairs of nodes sharing ≥2 title words (very simple heuristic)
+    stopwords = {"a", "an", "the", "of", "in", "for", "and", "to", "with"}
+    def _tokens(s: str) -> set[str]:
+        return {w.lower() for w in re.split(r"\W+", s) if len(w) > 2 and w.lower() not in stopwords}
+
+    candidate_links: list[dict[str, Any]] = []
+    node_titles = [(e["path"][-1], " > ".join(e["path"]), _tokens(e["path"][-1])) for e in all_nodes]
+    for i, (t1, p1, tok1) in enumerate(node_titles):
+        for t2, p2, tok2 in node_titles[i + 1:]:
+            if p1 == p2:
+                continue
+            shared = tok1 & tok2
+            if len(shared) >= 2:
+                candidate_links.append({
+                    "a": p1,
+                    "b": p2,
+                    "reason": f"shared title words: {', '.join(sorted(shared))}",
+                })
+    candidate_links = candidate_links[:20]  # cap output
+
+    return {
+        "recently_added": recently_added,
+        "stale_nodes": stale_nodes,
+        "weak_nodes": weak_nodes,
+        "candidate_links": candidate_links,
+    }
