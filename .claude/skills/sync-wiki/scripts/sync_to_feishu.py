@@ -28,7 +28,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Union
 
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -128,25 +128,56 @@ def _walk_tree(
 # ---------------------------------------------------------------------------
 
 
-def render_node_content(node: dict, kb_path: str, index_path: Path) -> str:
-    """Render plain-text body content for a KB node.
+def render_node_content(node: dict, kb_path: str, index_path: Path) -> list[dict]:
+    """Render rich-block content for a KB node.
 
-    Includes: node summary, typed memories (with labels, confidence, sources).
-    Returns empty string if the node has no meaningful content.
+    Returns a list of block dicts compatible with feishu.replace_doc_content_rich().
+    Each block: {"type": "heading2"|"text"|"code"|"bullet"|"divider", "content": str}
+
+    Page layout:
+        [code]   YAML front-matter (node path, date, source_refs)
+        [divider]
+        [heading2] 摘要          (if summary exists)
+        [text]   summary lines
+        [heading2] 知识要点       (if memories exist)
+        [bullet] per memory
+        [divider]
+        [heading2] 📚 参考资料   (if source_refs exist)
+        [bullet] per source ref
     """
-    parts: list[str] = []
+    blocks: list[dict] = []
+    today = datetime.now().strftime("%Y-%m-%d")
+    source_refs: list[str] = node.get("source_refs") or []
 
+    # ── YAML front-matter (code block) ──────────────────────────────────────
+    yaml_lines = [f"node: {kb_path}", f"updated: {today}"]
+    if source_refs:
+        yaml_lines.append("sources:")
+        for s in source_refs:
+            yaml_lines.append(f"  - {s}")
+    blocks.append({"type": "code", "content": "\n".join(yaml_lines)})
+    blocks.append({"type": "divider"})
+
+    # ── Summary ──────────────────────────────────────────────────────────────
     summary = (node.get("summary") or "").strip()
     if summary:
-        parts.append(f"【摘要】\n{summary}")
+        blocks.append({"type": "heading2", "content": "摘要"})
+        for line in summary.splitlines():
+            if line.strip():
+                blocks.append({"type": "text", "content": line.strip()})
 
+    # ── Typed memories ───────────────────────────────────────────────────────
     if index_path.exists():
         try:
             conn = retrieval.open_db(index_path)
-            memories = retrieval.list_memories_for_node(conn, kb_path)
+            # Memories are stored without the root node prefix (archive script
+            # takes paths starting from the second level, e.g. "A > B" not
+            # "Root > A > B").  Strip the root component before querying.
+            mem_path = kb_path.split(" > ", 1)[-1] if " > " in kb_path else kb_path
+            memories = retrieval.list_memories_for_node(conn, mem_path)
             conn.close()
             if memories:
-                lines: list[str] = []
+                blocks.append({"type": "heading2", "content": "知识要点"})
                 for m in memories:
                     label = retrieval._TYPE_LABELS.get(m.get("type", "fact"), m.get("type", ""))
                     line = f"[{label}] {m['content']}"
@@ -155,13 +186,19 @@ def render_node_content(node: dict, kb_path: str, index_path: Path) -> str:
                         line += f"  ({conf})"
                     refs: list[str] = m.get("source_refs") or []
                     if refs:
-                        line += "\n    来源: " + ", ".join(refs)
-                    lines.append(line)
-                parts.append("【知识要点】\n" + "\n".join(lines))
+                        line += "  |  来源: " + " / ".join(refs)
+                    blocks.append({"type": "bullet", "content": line})
         except Exception as exc:
             logger.debug("could not load memories for %s: %s", kb_path, exc)
 
-    return "\n\n".join(parts)
+    # ── References footer ────────────────────────────────────────────────────
+    if source_refs:
+        blocks.append({"type": "divider"})
+        blocks.append({"type": "heading2", "content": "📚 参考资料"})
+        for s in source_refs:
+            blocks.append({"type": "bullet", "content": s})
+
+    return blocks
 
 
 def render_interview_content(interview: dict) -> str:
@@ -197,8 +234,9 @@ class SyncAction:
     parent_kb_path: str
     node_token: str = ""
     obj_token: str = ""
-    content: str = ""
+    content: str = ""        # JSON of rich_blocks — used for hash comparison only
     content_hash: str = ""
+    rich_blocks: list = field(default_factory=list)  # actual blocks to write
     reason: str = ""
 
 
@@ -216,7 +254,9 @@ def build_diff(tree: dict, mapping: dict, index_path: Path) -> list[SyncAction]:
     actions: list[SyncAction] = []
 
     for kb_path, parent_path, _parent_token, node in _walk_tree(tree):
-        content = render_node_content(node, kb_path, index_path)
+        rich_blocks = render_node_content(node, kb_path, index_path)
+        # Stable JSON serialization for hash comparison
+        content = json.dumps(rich_blocks, ensure_ascii=False, sort_keys=True)
         content_hash = _sha256(content)
 
         if kb_path in nodes_map:
@@ -233,6 +273,7 @@ def build_diff(tree: dict, mapping: dict, index_path: Path) -> list[SyncAction]:
                         obj_token=entry.get("obj_token", ""),
                         content=content,
                         content_hash=content_hash,
+                        rich_blocks=rich_blocks,
                         reason="mapped, content unchanged",
                     )
                 )
@@ -248,11 +289,11 @@ def build_diff(tree: dict, mapping: dict, index_path: Path) -> list[SyncAction]:
                         obj_token=entry.get("obj_token", ""),
                         content=content,
                         content_hash=content_hash,
+                        rich_blocks=rich_blocks,
                         reason="mapped, content changed",
                     )
                 )
         else:
-            # Node not in map — check if the tree node already has tokens
             node_token = node.get("node_token", "")
             obj_token = node.get("obj_token", "")
             if node_token:
@@ -267,6 +308,7 @@ def build_diff(tree: dict, mapping: dict, index_path: Path) -> list[SyncAction]:
                         obj_token=obj_token,
                         content=content,
                         content_hash=content_hash,
+                        rich_blocks=rich_blocks,
                         reason="recovered from tree tokens",
                     )
                 )
@@ -280,6 +322,7 @@ def build_diff(tree: dict, mapping: dict, index_path: Path) -> list[SyncAction]:
                         parent_kb_path=parent_path,
                         content=content,
                         content_hash=content_hash,
+                        rich_blocks=rich_blocks,
                         reason="new node",
                     )
                 )
@@ -350,15 +393,12 @@ def recover_remote(tree: dict, mapping: dict) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _write_content(obj_token: str, content: str) -> bool:
-    """Write rendered content to a Feishu document (best-effort)."""
-    if not content.strip():
-        return True
-    paragraphs = [line for line in content.splitlines() if line.strip()]
-    if not paragraphs:
+def _write_content(obj_token: str, rich_blocks: list[dict]) -> bool:
+    """Write rich blocks to a Feishu document (best-effort)."""
+    if not rich_blocks:
         return True
     try:
-        return feishu.replace_doc_content(obj_token, paragraphs)
+        return feishu.replace_doc_content_rich(obj_token, rich_blocks)
     except Exception as exc:
         logger.error("content write failed (obj=%s): %s", obj_token, exc)
         return False
@@ -459,7 +499,7 @@ def apply_sync(
                 obj_token = result["obj_token"]
 
                 # Write content immediately after creation
-                content_ok = _write_content(obj_token, action.content)
+                content_ok = _write_content(obj_token, action.rich_blocks)
                 stored_hash = action.content_hash if content_ok else ""
 
                 # Back-fill tokens into the live tree object
@@ -482,7 +522,7 @@ def apply_sync(
 
             elif action.action == "update_content":
                 time.sleep(RATE_LIMIT_SLEEP)
-                content_ok = _write_content(action.obj_token, action.content)
+                content_ok = _write_content(action.obj_token, action.rich_blocks)
                 if content_ok:
                     nodes_map[action.kb_path] = {
                         "node_token": action.node_token,

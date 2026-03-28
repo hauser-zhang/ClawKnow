@@ -12,6 +12,7 @@ from lark_oapi.api.docx.v1 import (
     BatchDeleteDocumentBlockChildrenRequest,
     BatchDeleteDocumentBlockChildrenRequestBody,
     Block,
+    Divider,
     Text,
     TextElement,
     TextRun,
@@ -215,6 +216,104 @@ def replace_doc_content(document_id: str, paragraphs: list[str]) -> bool:
                 )
                 .build()
             )
+
+    if not children:
+        return True
+
+    create_req = (
+        CreateDocumentBlockChildrenRequest.builder()
+        .document_id(document_id)
+        .block_id(root_id)
+        .request_body(
+            CreateDocumentBlockChildrenRequestBody.builder()
+            .children(children)
+            .index(0)
+            .build()
+        )
+        .build()
+    )
+    resp = _client().docx.v1.document_block_children.create(create_req)
+    return resp.success()
+
+
+def replace_doc_content_rich(document_id: str, rich_blocks: list[dict]) -> bool:
+    """Overwrite the document body with rich typed blocks.
+
+    Each block dict must have a ``type`` key.  Supported types:
+        "text"    — plain paragraph       (block_type=2)
+        "heading2"— H2 heading            (block_type=4)
+        "heading3"— H3 heading            (block_type=5)
+        "code"    — code block            (block_type=14)
+        "bullet"  — bulleted list item    (block_type=10)
+        "divider" — horizontal rule       (block_type=22)
+    All types except "divider" also require a ``content`` key (str).
+    """
+    blocks = get_blocks(document_id)
+    if not blocks:
+        return False
+
+    root_id = blocks[0]["block_id"]
+    children_count = len(blocks) - 1
+
+    if children_count > 0:
+        del_req = (
+            BatchDeleteDocumentBlockChildrenRequest.builder()
+            .document_id(document_id)
+            .block_id(root_id)
+            .request_body(
+                BatchDeleteDocumentBlockChildrenRequestBody.builder()
+                .start_index(0)
+                .end_index(children_count)
+                .build()
+            )
+            .build()
+        )
+        _client().docx.v1.document_block_children.batch_delete(del_req)
+
+    if not rich_blocks:
+        return True
+
+    def _text_obj(content: str) -> Text:
+        return (
+            Text.builder()
+            .elements([
+                TextElement.builder()
+                .text_run(TextRun.builder().content(content).build())
+                .build()
+            ])
+            .build()
+        )
+
+    # Block-type → (block_type_id, builder_method_name)
+    _TYPE_MAP = {
+        "text":     (2,  "text"),
+        "heading2": (4,  "heading2"),
+        "heading3": (5,  "heading3"),
+        "code":     (14, "code"),
+        "bullet":   (12, "bullet"),
+    }
+
+    children = []
+    for b in rich_blocks:
+        btype = b.get("type", "text")
+        content = b.get("content", "")
+
+        if btype == "divider":
+            block = (
+                Block.builder()
+                .block_type(22)
+                .divider(Divider.builder().build())
+                .build()
+            )
+        elif btype in _TYPE_MAP:
+            bt_id, method = _TYPE_MAP[btype]
+            builder = Block.builder().block_type(bt_id)
+            block = getattr(builder, method)(_text_obj(content)).build()
+        else:
+            # Unknown type — fall back to plain paragraph
+            block = Block.builder().block_type(2).text(_text_obj(content)).build()
+
+        children.append(block)
 
     if not children:
         return True

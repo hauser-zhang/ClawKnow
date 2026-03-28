@@ -46,7 +46,7 @@ ClawKnow/
 │   ├── config.py          # Load .env vars; config.check() returns missing keys
 │   ├── feishu.py          # lark-oapi wrapper: list_spaces, list_nodes, list_nodes_all,
 │   │                      #   create_node, get_raw_content, get_blocks, append_text,
-│   │                      #   replace_doc_content
+│   │                      #   replace_doc_content, replace_doc_content_rich
 │   ├── workspace.py       # Multi-workspace resolver (see Workspace Model below)
 │   └── retrieval.py       # FTS5 two-stage retrieval + paper CRUD + edge management
 ├── .claude/
@@ -158,6 +158,7 @@ Single JSON object rooted at the top-level KB node. Every node has:
   "title": "string",           // required
   "summary": "string",         // optional; leaf nodes should have this
   "children": [],              // list of child nodes; omit or [] for leaves
+  "source_refs": [],           // list of source strings, e.g. "Title (URL)" — set by ingest-url
   "node_token": "string",      // set by sync-wiki after Feishu sync
   "obj_token": "string"        // set by sync-wiki after Feishu sync
 }
@@ -511,11 +512,22 @@ Gitignored (contains runtime Feishu identifiers, not source data).
 
 ### Content rendering (no model API)
 
-After creating a node, its Feishu document body is written with:
-- Node `summary` (from `knowledge_tree.json`)
-- Typed memories from `kb_index.db` (`memories` table), formatted with type labels
+After creating a node, its Feishu document body is written with rich typed blocks via
+`feishu.replace_doc_content_rich()`. The page layout is:
 
-Content is plain text paragraphs written via `feishu.replace_doc_content()`.
+1. YAML front-matter code block (node path, date, source_refs)
+2. Divider
+3. `## 摘要` — `summary` lines from `knowledge_tree.json`
+4. `## 知识要点` — one bullet per typed memory from `kb_index.db`
+5. Divider + `## 📚 参考资料` — source_refs bullets (if any)
+
+Supported block types: `text` (2), `heading2` (4), `heading3` (5), `code` (14),
+`bullet` (12 — **not** 10), `divider` (22).
+
+**Important:** memories are stored with paths that exclude the root node title (e.g.
+`"Post-Training Alignment > RLHF > PPO"`). `render_node_content` strips the root prefix
+before querying `list_memories_for_node`.
+
 No model API calls are made during rendering.
 
 ---
@@ -533,6 +545,7 @@ No model API calls are made during rendering.
 | discuss-paper | User wants to discuss / list / annotate ingested papers | `papers/<paper_id>.json` (user_insights append) | Yes — before appending insights | `discuss_paper.py` |
 | link-paper-to-kb | User wants to create/list/delete relation edges | `kb_index.db/edges` | Yes — before edge creation/deletion | `link_paper.py` |
 | graph-review | User asks for graph health report / stale/weak nodes | None (read-only) | No | `tools/review_graph.py` |
+| ingest-url | User gives a web URL (Zhihu, blog, Medium) and asks to add to KB | `kb_index.db/memories`; `knowledge_tree.json` source_refs | Yes — preview extracted memories before archiving | `ingest_url.py` + `archive_to_kb.py` |
 
 SKILL.md files are written in Chinese. All scripts and code comments are in English.
 
